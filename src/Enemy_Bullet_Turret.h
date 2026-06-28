@@ -46,6 +46,7 @@ public:
     void Kill() { alive = false; }
 
     glm::vec3 GetPosition() const { return position; }
+    glm::vec3 GetDirection() const { return direction; }
     bool IsAlive() const { return alive; }
     bool IsEnemyBullet() const { return isEnemy; }
 

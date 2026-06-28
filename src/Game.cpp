@@ -426,42 +426,37 @@ void Game::CheckCollisions() {
 }
 
 void Game::Render() {
-    renderer.BeginFrame();
-
     glm::mat4 projection = glm::perspective(glm::radians(45.0f),
                                            (float)screenWidth / screenHeight, 0.1f, 100.0f);
+    glm::vec3 cameraPos(0.0f, 30.0f, 30.0f);
     glm::mat4 view = glm::lookAt(
-        glm::vec3(0.0f, 30.0f, 30.0f),  // camera position
+        cameraPos,                      // camera position
         glm::vec3(0.0f, 0.0f, 0.0f),    // look at
         glm::vec3(0.0f, 1.0f, 0.0f)     // up
     );
+    
+    // Light is sun-like, coming from an angle
+    glm::vec3 lightPosition = glm::vec3(20.0f, 40.0f, 10.0f);
 
-    // Draw ground
+    // 1. SHADOW PASS
+    renderer.BeginShadowPass(lightPosition);
     renderer.DrawGround(projection, view);
-
-    // Draw turrets
-    for (auto& turret : turrets) {
-        renderer.DrawTurret(turret, projection, view);
-    }
-
-    // Draw players
+    for (auto& turret : turrets) renderer.DrawTurret(turret, projection, view);
     renderer.DrawPlayer(player1, projection, view);
     renderer.DrawPlayer(player2, projection, view);
+    for (auto& enemy : enemies) renderer.DrawEnemy(enemy, projection, view);
+    for (auto& bullet : bullets) renderer.DrawBullet(bullet, projection, view);
 
-    // Draw enemies
-    for (auto& enemy : enemies) {
-        renderer.DrawEnemy(enemy, projection, view);
-    }
+    // 2. MAIN PASS
+    renderer.BeginMainPass(projection, view, cameraPos);
+    renderer.DrawGround(projection, view);
+    for (auto& turret : turrets) renderer.DrawTurret(turret, projection, view);
+    renderer.DrawPlayer(player1, projection, view);
+    renderer.DrawPlayer(player2, projection, view);
+    for (auto& enemy : enemies) renderer.DrawEnemy(enemy, projection, view);
+    for (auto& bullet : bullets) renderer.DrawBullet(bullet, projection, view);
 
-    // Draw bullets
-    for (auto& bullet : bullets) {
-        renderer.DrawBullet(bullet, projection, view);
-    }
-
-    // Draw shadows
-    renderer.DrawShadows(player1, player2, enemies, turrets, projection, view);
-
-    // HUD
+    // 3. UI PASS
     if (gameState == PLAYING) {
         RenderHUD();
     } else if (gameState == GAME_OVER) {

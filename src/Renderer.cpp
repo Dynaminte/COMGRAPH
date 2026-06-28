@@ -21,19 +21,43 @@ layout(location = 2) in vec2 texCoords;
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
+uniform mat4 lightSpaceMatrix;
 
 out vec3 FragPos;
 out vec3 Normal;
 out vec2 TexCoords;
+out vec4 FragPosLightSpace;
 
 void main()
 {
     FragPos = vec3(model * vec4(position, 1.0));
     Normal = mat3(transpose(inverse(model))) * normal;
     TexCoords = texCoords;
+    FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
     gl_Position = projection * view * vec4(FragPos, 1.0);
 }
 )";
+
+// Depth shader
+const char* depthVertexShaderSource = R"(
+#version 410 core
+layout(location = 0) in vec3 position;
+uniform mat4 lightSpaceMatrix;
+uniform mat4 model;
+void main()
+{
+    gl_Position = lightSpaceMatrix * model * vec4(position, 1.0);
+}
+)";
+
+const char* depthFragmentShaderSource = R"(
+#version 410 core
+void main()
+{
+    // gl_FragDepth = gl_FragCoord.z;
+}
+)";
+
 
 // Simple fragment shader source
 const char* fragmentShaderSource = R"(
@@ -41,14 +65,34 @@ const char* fragmentShaderSource = R"(
 in vec3 FragPos;
 in vec3 Normal;
 in vec2 TexCoords;
+in vec4 FragPosLightSpace;
 
 uniform vec3 objectColor;
 uniform vec3 lightPos;
 uniform vec3 viewPos;
 uniform sampler2D texture_diffuse;
+uniform sampler2D shadowMap;
 uniform bool useTexture;
 
 out vec4 FragColor;
+
+float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+    if(projCoords.z > 1.0) return 0.0;
+    float currentDepth = projCoords.z;
+    float bias = max(0.01 * (1.0 - dot(normal, lightDir)), 0.002);
+    float shadow = 0.0;
+    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+    for(int x = -1; x <= 1; ++x) {
+        for(int y = -1; y <= 1; ++y) {
+            float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
+            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;        
+        }    
+    }
+    shadow /= 9.0;
+    return shadow;
+}
 
 void main()
 {
@@ -56,26 +100,29 @@ void main()
     if (useTexture) {
         color = texture(texture_diffuse, TexCoords * 33.0).rgb;
     }
-
     // Ambient
-    vec3 ambient = 0.3 * color;
-    
+    vec3 ambient = 0.5 * color;
     // Diffuse
     vec3 norm = normalize(Normal);
     vec3 lightDir = normalize(lightPos - FragPos);
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * color;
-    
     // Specular
     vec3 viewDir = normalize(viewPos - FragPos);
     vec3 reflectDir = reflect(-lightDir, norm);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32.0);
-    vec3 specular = 0.5 * spec * vec3(1.0);
+    vec3 specular = 0.8 * spec * vec3(1.0);
+    if (useTexture) {
+        specular = vec3(0.0); // No specular for sand/ground
+    }
     
-    vec3 result = ambient + diffuse + specular;
+    float shadow = ShadowCalculation(FragPosLightSpace, norm, lightDir);
+    
+    vec3 result = ambient + (1.0 - shadow) * (diffuse + specular);
     FragColor = vec4(result, 1.0);
 }
 )";
+
 
 // Helper function to load texture
 static GLuint loadTexture(const char* path) {
@@ -124,21 +171,48 @@ Renderer::~Renderer() {
 bool Renderer::Initialize() {
     // Compile shaders
     shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
-    if (shaderProgram == 0) {
-        std::cerr << "Failed to create shader program!" << std::endl;
+    shadowShaderProgram = CreateShaderProgram(depthVertexShaderSource, depthFragmentShaderSource);
+    if (shaderProgram == 0 || shadowShaderProgram == 0) {
+        std::cerr << "Failed to create shader programs!" << std::endl;
         return false;
     }
+
+    // Configure depth map FBO
+    glGenFramebuffers(1, &depthMapFBO);
+    glGenTextures(1, &depthMap);
+    glBindTexture(GL_TEXTURE_2D, depthMap);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 
+                 SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthMap, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     // Load floor texture from asset folder
     floorTexture = loadTexture("asset/sand2.jpeg");
     if (floorTexture == 0) {
-        // Fallback to absolute path if relative doesn't work
         floorTexture = loadTexture("../asset/sand2.jpeg");
     }
+
+    // Load tank and tower textures
+    tankTexture = loadTexture("asset/tank_camo.png");
+    if (tankTexture == 0) tankTexture = loadTexture("../asset/tank_camo.png");
+
+    turretTexture = loadTexture("asset/tower_metal.png");
+    if (turretTexture == 0) turretTexture = loadTexture("../asset/tower_metal.png");
 
     // Setup 3D shapes
     SetupShapes();
 
+    isShadowPass = false;
     return true;
 }
 
@@ -190,51 +264,51 @@ GLuint Renderer::CreateShaderProgram(const char* vertexSrc, const char* fragment
 }
 
 void Renderer::SetupShapes() {
-    // 1. CUBE setup
+    // 1. CUBE setup - Position(3) + Normal(3) + UV(2) = 8 floats per vertex
     float cubeVertices[] = {
-        // Position           // Normals
+        // Position              // Normals           // UV
         // Back face
-        -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-         0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-         0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,         
-         0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-        -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-        -0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+        -0.5f, -0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  0.0f, 0.0f,
+         0.5f,  0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  1.0f, 1.0f,
+         0.5f, -0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  1.0f, 0.0f,
+         0.5f,  0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  1.0f, 1.0f,
+        -0.5f, -0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  0.0f, 0.0f,
+        -0.5f,  0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  0.0f, 1.0f,
         // Front face
-        -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-         0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-        -0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-        -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+        -0.5f, -0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  0.0f, 0.0f,
+         0.5f, -0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  1.0f, 0.0f,
+         0.5f,  0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  1.0f, 1.0f,
+         0.5f,  0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  1.0f, 1.0f,
+        -0.5f,  0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  0.0f, 1.0f,
+        -0.5f, -0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  0.0f, 0.0f,
         // Left face
-        -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f,  0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f, -0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
+        -0.5f,  0.5f,  0.5f,  -1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
+        -0.5f,  0.5f, -0.5f,  -1.0f,  0.0f,  0.0f,  1.0f, 1.0f,
+        -0.5f, -0.5f, -0.5f,  -1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
+        -0.5f, -0.5f, -0.5f,  -1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
+        -0.5f, -0.5f,  0.5f,  -1.0f,  0.0f,  0.0f,  0.0f, 0.0f,
+        -0.5f,  0.5f,  0.5f,  -1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
         // Right face
-         0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f,  0.5f, -0.5f,  1.0f,  0.0f,  0.0f,         
-         0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f, -0.5f,  0.5f,  1.0f,  0.0f,  0.0f,     
+         0.5f,  0.5f,  0.5f,   1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
+         0.5f, -0.5f, -0.5f,   1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
+         0.5f,  0.5f, -0.5f,   1.0f,  0.0f,  0.0f,  1.0f, 1.0f,
+         0.5f, -0.5f, -0.5f,   1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
+         0.5f,  0.5f,  0.5f,   1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
+         0.5f, -0.5f,  0.5f,   1.0f,  0.0f,  0.0f,  0.0f, 0.0f,
         // Bottom face
-        -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
-         0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
-         0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
-         0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
-        -0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
-        -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
+        -0.5f, -0.5f, -0.5f,   0.0f, -1.0f,  0.0f,  0.0f, 1.0f,
+         0.5f, -0.5f, -0.5f,   0.0f, -1.0f,  0.0f,  1.0f, 1.0f,
+         0.5f, -0.5f,  0.5f,   0.0f, -1.0f,  0.0f,  1.0f, 0.0f,
+         0.5f, -0.5f,  0.5f,   0.0f, -1.0f,  0.0f,  1.0f, 0.0f,
+        -0.5f, -0.5f,  0.5f,   0.0f, -1.0f,  0.0f,  0.0f, 0.0f,
+        -0.5f, -0.5f, -0.5f,   0.0f, -1.0f,  0.0f,  0.0f, 1.0f,
         // Top face
-        -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
-        -0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
-         0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
-        -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f
+        -0.5f,  0.5f, -0.5f,   0.0f,  1.0f,  0.0f,  0.0f, 1.0f,
+        -0.5f,  0.5f,  0.5f,   0.0f,  1.0f,  0.0f,  0.0f, 0.0f,
+         0.5f,  0.5f,  0.5f,   0.0f,  1.0f,  0.0f,  1.0f, 0.0f,
+         0.5f,  0.5f,  0.5f,   0.0f,  1.0f,  0.0f,  1.0f, 0.0f,
+         0.5f,  0.5f, -0.5f,   0.0f,  1.0f,  0.0f,  1.0f, 1.0f,
+        -0.5f,  0.5f, -0.5f,   0.0f,  1.0f,  0.0f,  0.0f, 1.0f
     };
     cubeFaceCount = 36;
     GLuint cubeVBO;
@@ -243,10 +317,15 @@ void Renderer::SetupShapes() {
     glBindVertexArray(cubeVAO);
     glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(cubeVertices), cubeVertices, GL_STATIC_DRAW);
+    // Position
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    // Normal
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+    // UV
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
     glBindVertexArray(0);
     glDeleteBuffers(1, &cubeVBO);
 
@@ -345,35 +424,42 @@ void Renderer::SetupShapes() {
     const float cylHeight = 1.0f;
     const float cylRadius = 0.5f;
 
-    // Side wall
+    // Side wall — 8 floats per vertex: pos(3) + normal(3) + uv(2)
     for (int i = 0; i < cylSectors; ++i) {
         float angle0 = 2 * PI * (float)i / cylSectors;
         float angle1 = 2 * PI * (float)(i + 1) / cylSectors;
 
-        float x0 = cos(angle0) * cylRadius;
-        float z0 = sin(angle0) * cylRadius;
-        float x1 = cos(angle1) * cylRadius;
-        float z1 = sin(angle1) * cylRadius;
+        float x0 = cos(angle0) * cylRadius, z0 = sin(angle0) * cylRadius;
+        float x1 = cos(angle1) * cylRadius, z1 = sin(angle1) * cylRadius;
 
-        // Triangle 1
+        float u0 = (float)i / cylSectors;
+        float u1 = (float)(i + 1) / cylSectors;
+
+        // Triangle 1: bottom-left, bottom-right, top-right
         cylinderVertices.push_back(x0); cylinderVertices.push_back(-cylHeight*0.5f); cylinderVertices.push_back(z0);
         cylinderVertices.push_back(cos(angle0)); cylinderVertices.push_back(0.0f); cylinderVertices.push_back(sin(angle0));
+        cylinderVertices.push_back(u0); cylinderVertices.push_back(0.0f);
 
         cylinderVertices.push_back(x1); cylinderVertices.push_back(-cylHeight*0.5f); cylinderVertices.push_back(z1);
         cylinderVertices.push_back(cos(angle1)); cylinderVertices.push_back(0.0f); cylinderVertices.push_back(sin(angle1));
+        cylinderVertices.push_back(u1); cylinderVertices.push_back(0.0f);
 
         cylinderVertices.push_back(x1); cylinderVertices.push_back(cylHeight*0.5f); cylinderVertices.push_back(z1);
         cylinderVertices.push_back(cos(angle1)); cylinderVertices.push_back(0.0f); cylinderVertices.push_back(sin(angle1));
+        cylinderVertices.push_back(u1); cylinderVertices.push_back(1.0f);
 
-        // Triangle 2
+        // Triangle 2: bottom-left, top-right, top-left
         cylinderVertices.push_back(x0); cylinderVertices.push_back(-cylHeight*0.5f); cylinderVertices.push_back(z0);
         cylinderVertices.push_back(cos(angle0)); cylinderVertices.push_back(0.0f); cylinderVertices.push_back(sin(angle0));
+        cylinderVertices.push_back(u0); cylinderVertices.push_back(0.0f);
 
         cylinderVertices.push_back(x1); cylinderVertices.push_back(cylHeight*0.5f); cylinderVertices.push_back(z1);
         cylinderVertices.push_back(cos(angle1)); cylinderVertices.push_back(0.0f); cylinderVertices.push_back(sin(angle1));
+        cylinderVertices.push_back(u1); cylinderVertices.push_back(1.0f);
 
         cylinderVertices.push_back(x0); cylinderVertices.push_back(cylHeight*0.5f); cylinderVertices.push_back(z0);
         cylinderVertices.push_back(cos(angle0)); cylinderVertices.push_back(0.0f); cylinderVertices.push_back(sin(angle0));
+        cylinderVertices.push_back(u0); cylinderVertices.push_back(1.0f);
     }
 
     // Top cap
@@ -381,19 +467,21 @@ void Renderer::SetupShapes() {
         float angle0 = 2 * PI * (float)i / cylSectors;
         float angle1 = 2 * PI * (float)(i + 1) / cylSectors;
 
-        float x0 = cos(angle0) * cylRadius;
-        float z0 = sin(angle0) * cylRadius;
-        float x1 = cos(angle1) * cylRadius;
-        float z1 = sin(angle1) * cylRadius;
+        float x0 = cos(angle0) * cylRadius, z0 = sin(angle0) * cylRadius;
+        float x1 = cos(angle1) * cylRadius, z1 = sin(angle1) * cylRadius;
 
+        // center
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(cylHeight*0.5f); cylinderVertices.push_back(0.0f);
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(1.0f); cylinderVertices.push_back(0.0f);
+        cylinderVertices.push_back(0.5f); cylinderVertices.push_back(0.5f);
 
         cylinderVertices.push_back(x0); cylinderVertices.push_back(cylHeight*0.5f); cylinderVertices.push_back(z0);
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(1.0f); cylinderVertices.push_back(0.0f);
+        cylinderVertices.push_back(0.5f + 0.5f*cos(angle0)); cylinderVertices.push_back(0.5f + 0.5f*sin(angle0));
 
         cylinderVertices.push_back(x1); cylinderVertices.push_back(cylHeight*0.5f); cylinderVertices.push_back(z1);
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(1.0f); cylinderVertices.push_back(0.0f);
+        cylinderVertices.push_back(0.5f + 0.5f*cos(angle1)); cylinderVertices.push_back(0.5f + 0.5f*sin(angle1));
     }
 
     // Bottom cap
@@ -401,43 +489,82 @@ void Renderer::SetupShapes() {
         float angle0 = 2 * PI * (float)i / cylSectors;
         float angle1 = 2 * PI * (float)(i + 1) / cylSectors;
 
-        float x0 = cos(angle0) * cylRadius;
-        float z0 = sin(angle0) * cylRadius;
-        float x1 = cos(angle1) * cylRadius;
-        float z1 = sin(angle1) * cylRadius;
+        float x0 = cos(angle0) * cylRadius, z0 = sin(angle0) * cylRadius;
+        float x1 = cos(angle1) * cylRadius, z1 = sin(angle1) * cylRadius;
 
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(-cylHeight*0.5f); cylinderVertices.push_back(0.0f);
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(-1.0f); cylinderVertices.push_back(0.0f);
+        cylinderVertices.push_back(0.5f); cylinderVertices.push_back(0.5f);
 
         cylinderVertices.push_back(x1); cylinderVertices.push_back(-cylHeight*0.5f); cylinderVertices.push_back(z1);
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(-1.0f); cylinderVertices.push_back(0.0f);
+        cylinderVertices.push_back(0.5f + 0.5f*cos(angle1)); cylinderVertices.push_back(0.5f + 0.5f*sin(angle1));
 
         cylinderVertices.push_back(x0); cylinderVertices.push_back(-cylHeight*0.5f); cylinderVertices.push_back(z0);
         cylinderVertices.push_back(0.0f); cylinderVertices.push_back(-1.0f); cylinderVertices.push_back(0.0f);
+        cylinderVertices.push_back(0.5f + 0.5f*cos(angle0)); cylinderVertices.push_back(0.5f + 0.5f*sin(angle0));
     }
-    cylinderFaceCount = cylinderVertices.size() / 6;
+    cylinderFaceCount = cylinderVertices.size() / 8; // now 8 floats per vertex
     GLuint cylinderVBO;
     glGenVertexArrays(1, &cylinderVAO);
     glGenBuffers(1, &cylinderVBO);
     glBindVertexArray(cylinderVAO);
     glBindBuffer(GL_ARRAY_BUFFER, cylinderVBO);
     glBufferData(GL_ARRAY_BUFFER, cylinderVertices.size() * sizeof(float), cylinderVertices.data(), GL_STATIC_DRAW);
+    // Position
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    // Normal
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+    // UV
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
     glBindVertexArray(0);
     glDeleteBuffers(1, &cylinderVBO);
 }
 
-void Renderer::BeginFrame() {
-    glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+void Renderer::BeginShadowPass(glm::vec3 lightPosition) {
+    isShadowPass = true;
+    lightPos = lightPosition;
+
+    // 1. Render depth of scene to texture (from light's perspective)
+    glm::mat4 lightProjection, lightView;
+    float near_plane = 1.0f, far_plane = 75.0f;
+    lightProjection = glm::ortho(-35.0f, 35.0f, -35.0f, 35.0f, near_plane, far_plane);
+    lightView = glm::lookAt(lightPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    lightSpaceMatrix = lightProjection * lightView;
+
+    glUseProgram(shadowShaderProgram);
+    glUniformMatrix4fv(glGetUniformLocation(shadowShaderProgram, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+
+    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+    glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    // Draw functions will be called next...
 }
 
-void Renderer::EndFrame() {
-    // Post-processing jika ada
+void Renderer::BeginMainPass(glm::mat4 projection, glm::mat4 view, glm::vec3 cameraPos) {
+    isShadowPass = false;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screenWidth, screenHeight);
+    glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(shaderProgram);
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+    glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), cameraPos.x, cameraPos.y, cameraPos.z);
+    glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), lightPos.x, lightPos.y, lightPos.z);
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+    
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, depthMap);
+    glUniform1i(glGetUniformLocation(shaderProgram, "shadowMap"), 1);
+    // Draw functions will be called next...
 }
+
+void Renderer::EndFrame() {}
 
 // --- Local Helpers for 2D UI and Font Rendering ---
 struct Point2D { float x, y; };
@@ -614,6 +741,11 @@ static std::vector<Line2D> getCharStrokes(char c) {
         case '-':
             lines.push_back({ml, mr});
             break;
+        case '*':
+            lines.push_back({tc, bc}); // Vertikal
+            lines.push_back({{0.15f, 0.35f}, {0.85f, 0.65f}}); // Diagonal turun
+            lines.push_back({{0.15f, 0.65f}, {0.85f, 0.35f}}); // Diagonal naik
+            break;
         case ' ':
             break;
         default:
@@ -716,26 +848,22 @@ static glm::vec3 healthColor(float pct) {
 }
 
 void Renderer::DrawGround(glm::mat4 projection, glm::mat4 view) {
-    glUseProgram(shaderProgram);
+    GLuint currentProg = isShadowPass ? shadowShaderProgram : shaderProgram;
+    glUseProgram(currentProg);
     
-    glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
-    glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
-    
-    // Horizontal ground is rotated X-Y plane flat onto X-Z
     glm::mat4 model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
     model = glm::scale(model, glm::vec3(200.0f, 200.0f, 1.0f));
-    
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(model));
 
-    if (floorTexture != 0) {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, floorTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
-        glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
-    } else {
-        glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
+    if (!isShadowPass) {
+        if (floorTexture != 0) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, floorTexture);
+            glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
+            glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
+        }
     }
 
     glBindVertexArray(quadVAO);
@@ -744,38 +872,68 @@ void Renderer::DrawGround(glm::mat4 projection, glm::mat4 view) {
 }
 
 void Renderer::DrawPlayer(const Player& player, glm::mat4 projection, glm::mat4 view) {
-    glUseProgram(shaderProgram);
-
-    glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
-    glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
+    GLuint currentProg = isShadowPass ? shadowShaderProgram : shaderProgram;
+    glUseProgram(currentProg);
 
     glm::vec3 pos = player.GetPosition();
     glm::vec3 rot = player.GetRotation();
-
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
     model = glm::rotate(model, rot.y, glm::vec3(0.0f, 1.0f, 0.0f));
 
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-
-    glm::vec3 color = player.IsPlayer1() ? glm::vec3(0.2f, 0.8f, 0.2f) 
-                                         : glm::vec3(0.2f, 0.2f, 0.8f);
-
-    // Draw tank body (cube)
+    // --- Body (Textured Cube) ---
     glm::mat4 bodyModel = glm::scale(model, glm::vec3(1.5f, 0.6f, 2.0f));
-    DrawCube(bodyModel, color);
+    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(bodyModel));
+    if (!isShadowPass && tankTexture != 0) {
+        DrawCubeTextured(bodyModel, tankTexture);
+    } else if (!isShadowPass) {
+        glm::vec3 color = player.IsPlayer1() ? glm::vec3(0.2f, 0.8f, 0.2f) : glm::vec3(0.2f, 0.2f, 0.8f);
+        DrawCube(bodyModel, color);
+    } else {
+        glBindVertexArray(cubeVAO); glDrawArrays(GL_TRIANGLES, 0, cubeFaceCount); glBindVertexArray(0);
+    }
 
-    // Draw turret (cylinder)
+    // --- Turret Dome (Textured Cylinder) ---
     glm::mat4 turretModel = glm::translate(model, glm::vec3(0.0f, 0.5f, 0.0f));
     turretModel = glm::scale(turretModel, glm::vec3(0.8f, 0.5f, 0.8f));
-    DrawCylinder(turretModel, color * 0.8f);
+    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(turretModel));
+    if (!isShadowPass && tankTexture != 0) {
+        DrawCylinderTextured(turretModel, tankTexture);
+    } else if (!isShadowPass) {
+        glm::vec3 color = player.IsPlayer1() ? glm::vec3(0.15f, 0.65f, 0.15f) : glm::vec3(0.15f, 0.15f, 0.65f);
+        DrawCylinder(turretModel, color);
+    } else {
+        glBindVertexArray(cylinderVAO); glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount); glBindVertexArray(0);
+    }
 
-    // Draw barrel (cylinder extended forward)
+    // --- Barrel (Grey metal) ---
     glm::mat4 barrelModel = glm::translate(model, glm::vec3(0.0f, 0.5f, -0.8f));
-    barrelModel = glm::rotate(barrelModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f)); // point forward
+    barrelModel = glm::rotate(barrelModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
     barrelModel = glm::scale(barrelModel, glm::vec3(0.2f, 1.2f, 0.2f));
-    DrawCylinder(barrelModel, glm::vec3(0.3f, 0.3f, 0.3f));
+    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(barrelModel));
+    if (!isShadowPass) { DrawCylinder(barrelModel, glm::vec3(0.25f, 0.25f, 0.25f)); }
+    else { glBindVertexArray(cylinderVAO); glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount); glBindVertexArray(0); }
+
+    // --- World-space HP bar above tank (only in main pass) ---
+    if (!isShadowPass && player.GetHealth() > 0) {
+        glUseProgram(shaderProgram);
+        float hpPct = player.GetHealth() / 100.0f;
+        
+        // Background (dark)
+        glm::mat4 hpBg = glm::translate(glm::mat4(1.0f), pos + glm::vec3(0.0f, 1.5f, 0.0f));
+        hpBg = glm::scale(hpBg, glm::vec3(2.0f, 0.15f, 0.15f));
+        DrawCube(hpBg, glm::vec3(0.1f, 0.1f, 0.1f));
+
+        // Foreground (color by health)
+        glm::vec3 hpColor = hpPct > 0.6f ? glm::vec3(0.2f, 0.85f, 0.2f) :
+                            hpPct > 0.3f ? glm::vec3(0.9f, 0.75f, 0.1f) :
+                                           glm::vec3(0.9f, 0.15f, 0.15f);
+        glm::mat4 hpFg = glm::translate(glm::mat4(1.0f), pos + glm::vec3(-1.0f * (1.0f - hpPct), 1.5f, 0.01f));
+        hpFg = glm::scale(hpFg, glm::vec3(2.0f * hpPct, 0.15f, 0.15f));
+        DrawCube(hpFg, hpColor);
+    }
+    glBindVertexArray(0);
 }
+
 
 void Renderer::DrawEnemy(const Enemy& enemy, glm::mat4 projection, glm::mat4 view) {
     glUseProgram(shaderProgram);
@@ -851,20 +1009,29 @@ void Renderer::DrawEnemy(const Enemy& enemy, glm::mat4 projection, glm::mat4 vie
 }
 
 void Renderer::DrawBullet(const Bullet& bullet, glm::mat4 projection, glm::mat4 view) {
-    glUseProgram(shaderProgram);
-
-    glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
-    glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
+    GLuint currentProg = isShadowPass ? shadowShaderProgram : shaderProgram;
+    glUseProgram(currentProg);
 
     glm::vec3 pos = bullet.GetPosition();
+    glm::vec3 dir = bullet.GetDirection();
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
-    model = glm::scale(model, glm::vec3(0.3f, 0.3f, 0.3f));
+    
+    // Rotate the bullet to face its direction
+    float rotY = atan2(dir.x, dir.z);
+    model = glm::rotate(model, rotY, glm::vec3(0.0f, 1.0f, 0.0f));
+    
+    // Scale it to be oval/elongated along its local Z axis
+    model = glm::scale(model, glm::vec3(0.15f, 0.15f, 0.4f));
 
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-
-    glm::vec3 color = bullet.IsEnemyBullet() ? glm::vec3(1.0f, 0.15f, 0.15f) : glm::vec3(1.0f, 1.0f, 0.0f);
-    DrawSphere(model, color, 0.3f);
+    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(model));
+    if(!isShadowPass) {
+        glm::vec3 color = bullet.IsEnemyBullet() ? glm::vec3(1.0f, 0.15f, 0.15f) : glm::vec3(1.0f, 1.0f, 0.0f);
+        glUniform3f(glGetUniformLocation(currentProg, "objectColor"), color.x, color.y, color.z);
+        glUniform1i(glGetUniformLocation(currentProg, "useTexture"), 0);
+    }
+    glBindVertexArray(sphereVAO);
+    glDrawArrays(GL_TRIANGLES, 0, sphereFaceCount);
+    glBindVertexArray(0);
 }
 
 void Renderer::DrawTurret(const Turret& turret, glm::mat4 projection, glm::mat4 view) {
@@ -893,9 +1060,10 @@ void Renderer::DrawTurret(const Turret& turret, glm::mat4 projection, glm::mat4 
         DrawQuad(ringModel, glm::vec3(0.4f, 0.15f, 0.15f)); // Dark red for destroyed
     }
 
-    // 2. Base plate (Cube) - scaled larger (2.5f, 0.6f, 2.5f)
+    // 2. Base plate (Cube) - textured or colored
     glm::mat4 baseModel = glm::scale(model, glm::vec3(2.5f, 0.6f, 2.5f));
-    DrawCube(baseModel, color);
+    if (turretTexture != 0 && turret.IsAlive()) DrawCubeTextured(baseModel, turretTexture);
+    else DrawCube(baseModel, color);
 
     // 3. Four Corner Pillars/Pads for structural reinforcement (Cubes)
     if (turret.IsAlive()) {
@@ -916,12 +1084,14 @@ void Renderer::DrawTurret(const Turret& turret, glm::mat4 projection, glm::mat4 
     // 4. Sub-base plate (Cube) - scaled larger
     glm::mat4 subBaseModel = glm::translate(model, glm::vec3(0.0f, 0.35f, 0.0f));
     subBaseModel = glm::scale(subBaseModel, glm::vec3(1.8f, 0.3f, 1.8f));
-    DrawCube(subBaseModel, color * 0.8f);
+    if (turretTexture != 0 && turret.IsAlive()) DrawCubeTextured(subBaseModel, turretTexture);
+    else DrawCube(subBaseModel, color * 0.8f);
 
     // 5. Dome body (Cylinder) - scaled larger
     glm::mat4 bodyModel = glm::translate(model, glm::vec3(0.0f, 0.8f, 0.0f));
     bodyModel = glm::scale(bodyModel, glm::vec3(1.4f, 0.8f, 1.4f));
-    DrawCylinder(bodyModel, color * 0.95f);
+    if (turretTexture != 0 && turret.IsAlive()) DrawCylinderTextured(bodyModel, turretTexture);
+    else DrawCylinder(bodyModel, color * 0.95f);
 
     // 6. Dome Side shields/armor plates (Cubes)
     if (turret.IsAlive()) {
@@ -989,6 +1159,30 @@ void Renderer::DrawCube(glm::mat4 model, glm::vec3 color) {
     glBindVertexArray(0);
 }
 
+void Renderer::DrawCubeTextured(glm::mat4 model, GLuint texture) {
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
+    glBindVertexArray(cubeVAO);
+    glDrawArrays(GL_TRIANGLES, 0, cubeFaceCount);
+    glBindVertexArray(0);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
+}
+
+void Renderer::DrawCylinderTextured(glm::mat4 model, GLuint texture) {
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
+    glBindVertexArray(cylinderVAO);
+    glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount);
+    glBindVertexArray(0);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
+}
+
 void Renderer::DrawSphere(glm::mat4 model, glm::vec3 color, float radius) {
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
@@ -1016,55 +1210,10 @@ void Renderer::DrawQuad(glm::mat4 model, glm::vec3 color) {
     glBindVertexArray(0);
 }
 
-void Renderer::DrawShadows(const Player& p1, const Player& p2,
-                          const std::vector<Enemy>& enemies,
-                          const std::vector<Turret>& turrets,
-                          glm::mat4 projection, glm::mat4 view) {
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    
-    glUseProgram(shaderProgram);
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-    
-    glm::vec3 shadowColor(0.02f, 0.02f, 0.02f);
-    glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), shadowColor.x, shadowColor.y, shadowColor.z);
 
-    auto drawObjectShadow = [&](glm::vec3 pos, glm::vec3 scale, float rotY, bool isCube) {
-        // Shadow is projected flat on ground at y = 0.01f
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(pos.x, 0.01f, pos.z));
-        // Rotate flat onto ground
-        model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        model = glm::rotate(model, rotY, glm::vec3(0.0f, 0.0f, 1.0f));
-        model = glm::scale(model, glm::vec3(scale.x * 1.2f, scale.z * 1.2f, 1.0f));
-        
-        DrawQuad(model, shadowColor);
-    };
-
-    // Draw Player 1 shadow
-    if (p1.GetHealth() > 0) {
-        drawObjectShadow(p1.GetPosition(), glm::vec3(1.5f, 0.6f, 2.0f), p1.GetRotation().y, true);
-    }
-    // Draw Player 2 shadow
-    if (p2.GetHealth() > 0) {
-        drawObjectShadow(p2.GetPosition(), glm::vec3(1.5f, 0.6f, 2.0f), p2.GetRotation().y, true);
-    }
-    // Draw Enemy shadows
-    for (const auto& enemy : enemies) {
-        drawObjectShadow(enemy.GetPosition(), glm::vec3(1.0f, 1.0f, 1.0f), enemy.GetRotation(), true);
-    }
-    // Draw Turret shadows
-    for (const auto& turret : turrets) {
-        if (turret.IsAlive()) {
-            drawObjectShadow(turret.GetPosition(), glm::vec3(1.5f, 1.5f, 1.5f), 0.0f, true);
-        }
-    }
-}
 
 void Renderer::DrawHUD(const Player& p1, const Player& p2, float gameTimer,
                       float waveDuration, int* turretHealth, int score, int wave) {
-    // Estimate rendered width of a string at a given scale (matches the
-    // per-character advance used inside DrawText2D: charWidth + spacing).
     auto textWidth = [](const std::string& s, float scale) {
         return (float)s.size() * 16.0f * scale;
     };
@@ -1073,9 +1222,9 @@ void Renderer::DrawHUD(const Player& p1, const Player& p2, float gameTimer,
     glm::vec3 white(0.95f, 0.95f, 0.95f);
     glm::vec3 amber(0.95f, 0.78f, 0.25f);
     glm::vec3 slotColors[3] = {
-        glm::vec3(0.30f, 0.80f, 0.32f), // status 1 - green
-        glm::vec3(0.92f, 0.78f, 0.20f), // status 2 - amber
-        glm::vec3(0.86f, 0.30f, 0.26f)  // status 3 - red
+        glm::vec3(0.30f, 0.80f, 0.32f), // green
+        glm::vec3(0.92f, 0.78f, 0.20f), // amber
+        glm::vec3(0.86f, 0.30f, 0.26f)  // red
     };
     glm::vec3 lostColor(0.20f, 0.20f, 0.23f);
     glm::vec3 pipLabelColor(0.65f, 0.65f, 0.68f);
@@ -1087,17 +1236,21 @@ void Renderer::DrawHUD(const Player& p1, const Player& p2, float gameTimer,
     const float TOP_H = 64.0f;
     drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, sw, TOP_H, panelColor, sw, sh);
 
-    // --- Player 1 (left): label, bordered HP bar, lives ---
-    DrawText2D("P1", 18.0f, 20.0f, 1.0f, glm::vec3(0.35f, 0.85f, 0.4f));
-    float p1BarX = 56.0f, p1BarY = 24.0f, p1BarW = 168.0f, p1BarH = 16.0f;
+    // --- Player 1 (Left) ---
+    DrawText2D("P1", 18.0f, 14.0f, 1.0f, glm::vec3(0.35f, 0.85f, 0.4f));
+    float p1BarX = 56.0f, p1BarY = 18.0f, p1BarW = 150.0f, p1BarH = 14.0f;
     float p1Pct = p1.GetHealth() / 100.0f;
     drawBorderedBar2D(shaderProgram, quadVAO, quadFaceCount, p1BarX, p1BarY, p1BarW, p1BarH, p1Pct, healthColor(p1Pct), sw, sh);
-    std::string p1LivesText = "LIVES:" + std::to_string(p1.GetLives());
-    DrawText2D(p1LivesText, p1BarX + p1BarW + 14.0f, 20.0f, 0.8f, amber);
+    
+    // P1 Lives - draw as stars below HP bar
+    std::string p1LivesText = "LIVES: ";
+    for (int i=0; i<p1.GetLives(); i++) p1LivesText += "* ";
+    DrawText2D(p1LivesText, 56.0f, 38.0f, 0.75f, amber);
 
-    // --- Center: Score / Wave / Time (dynamically centered as a group) ---
+    // --- CENTER: SCORE / WAVE / TIME (clearly visible) ---
     std::string scoreText = "SCORE:" + std::to_string(score);
-    std::string waveText = "WAVE:" + std::to_string(wave);
+    std::string waveText  = "WAVE:" + std::to_string(wave);
+    
     const float TOTAL_TIME = 60.0f;
     float remaining = std::max(0.0f, TOTAL_TIME - gameTimer);
     int mins = (int)(remaining / 60.0f);
@@ -1106,69 +1259,58 @@ void Renderer::DrawHUD(const Player& p1, const Player& p2, float gameTimer,
     snprintf(timeBuf, sizeof(timeBuf), "%01d:%02d", mins, secs);
     std::string timerText = std::string("TIME:") + timeBuf;
 
-    {
-        float gap = 36.0f, scale = 0.9f;
-        float totalW = textWidth(scoreText, scale) + gap + textWidth(waveText, scale) + gap + textWidth(timerText, scale);
-        float cx = sw / 2.0f - totalW / 2.0f;
-        DrawText2D(scoreText, cx, 20.0f, scale, white);
-        cx += textWidth(scoreText, scale) + gap;
-        DrawText2D(waveText, cx, 20.0f, scale, white);
-        cx += textWidth(waveText, scale) + gap;
-        DrawText2D(timerText, cx, 20.0f, scale, white);
-    }
+    float gap = 36.0f, scale = 0.9f;
+    float totalW = textWidth(scoreText, scale) + gap + textWidth(waveText, scale) + gap + textWidth(timerText, scale);
+    float startX = sw / 2.0f - totalW / 2.0f;
 
-    // --- Player 2 (right, mirrored): lives, bordered HP bar, label ---
-    float p2BarW = 168.0f, p2BarH = 16.0f, p2BarY = 24.0f;
+    DrawText2D(scoreText, startX, 22.0f, scale, white);
+    startX += textWidth(scoreText, scale) + gap;
+    DrawText2D(waveText,  startX, 22.0f, scale, glm::vec3(0.3f, 0.9f, 1.0f));
+    startX += textWidth(waveText, scale) + gap;
+    DrawText2D(timerText, startX, 22.0f, scale, glm::vec3(1.0f, 0.85f, 0.3f));
+
+    // --- Player 2 (Right) ---
+    float p2BarW = 150.0f, p2BarH = 14.0f, p2BarY = 18.0f;
     float p2BarX = sw - 56.0f - p2BarW;
     float p2Pct = p2.GetHealth() / 100.0f;
-    std::string p2LivesText = "LIVES:" + std::to_string(p2.GetLives());
-    DrawText2D(p2LivesText, p2BarX - 14.0f - textWidth(p2LivesText, 0.8f), 20.0f, 0.8f, amber);
+    
+    std::string p2LivesText = "LIVES: ";
+    for (int i=0; i<p2.GetLives(); i++) p2LivesText += "* ";
+    float p2LivesW = textWidth(p2LivesText, 0.75f);
+    DrawText2D(p2LivesText, sw - 56.0f - p2LivesW, 38.0f, 0.75f, amber);
+    
     drawBorderedBar2D(shaderProgram, quadVAO, quadFaceCount, p2BarX, p2BarY, p2BarW, p2BarH, p2Pct, healthColor(p2Pct), sw, sh);
-    DrawText2D("P2", p2BarX + p2BarW + 14.0f, 20.0f, 1.0f, glm::vec3(0.35f, 0.6f, 0.95f));
+    DrawText2D("P2", p2BarX + p2BarW + 14.0f, 14.0f, 1.0f, glm::vec3(0.35f, 0.6f, 0.95f));
 
     // ===================== BOTTOM BAR =====================
-    const float BOT_H = 54.0f;
+    const float BOT_H = 52.0f;
     float botY = sh - BOT_H;
     drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, botY, sw, BOT_H, panelColor, sw, sh);
 
-    const float PIP_W = 32.0f, PIP_H = 13.0f, PIP_GAP = 14.0f;
+    // --- Left: WAVE and TIME (redundant display for quick glance during gameplay) ---
+    DrawText2D(waveText,  18.0f, botY + 8.0f,  0.85f, glm::vec3(0.3f, 0.9f, 1.0f));
+    DrawText2D(timerText, 18.0f, botY + 28.0f, 0.85f, glm::vec3(1.0f, 0.85f, 0.3f));
 
-    // --- Left: LIVES pips for Player 1 (one pip per remaining life) ---
-    DrawText2D("LIVES:", 18.0f, botY + 19.0f, 0.8f, white);
-    float livesStartX = 18.0f + textWidth("LIVES:", 0.8f) + 16.0f;
-    for (int i = 0; i < 3; i++) {
-        float px = livesStartX + i * (PIP_W + PIP_GAP);
-        std::string label = "T" + std::to_string(i + 1);
-        DrawText2D(label, px + PIP_W * 0.5f - textWidth(label, 0.55f) * 0.5f, botY + 6.0f, 0.55f, pipLabelColor);
-        bool alive = p1.GetLives() > i;
-        drawPip2D(shaderProgram, quadVAO, quadFaceCount, px, botY + 30.0f, PIP_W, PIP_H, alive ? slotColors[i] : lostColor, sw, sh);
-    }
-
-    // --- Center: Wave / Time (mirrored from the top bar) ---
-    {
-        float gap = 36.0f, scale = 0.85f;
-        float totalW = textWidth(waveText, scale) + gap + textWidth(timerText, scale);
-        float cx = sw / 2.0f - totalW / 2.0f;
-        DrawText2D(waveText, cx, botY + 19.0f, scale, white);
-        cx += textWidth(waveText, scale) + gap;
-        DrawText2D(timerText, cx, botY + 19.0f, scale, white);
-    }
-
-    // --- Right: TURRETS status pips (green/amber/red by health, gray if destroyed) ---
+    // --- Center: TURRET STATUS ---
+    const float PIP_W = 60.0f, PIP_H = 18.0f, PIP_GAP = 20.0f;
     float turretsPipsTotalW = 3.0f * PIP_W + 2.0f * PIP_GAP;
-    float turretsPipsStartX = sw - 18.0f - turretsPipsTotalW;
-    std::string turretsLabel = "TURRETS";
-    DrawText2D(turretsLabel, turretsPipsStartX - 16.0f - textWidth(turretsLabel, 0.8f), botY + 19.0f, 0.8f, white);
+    float turretsPipsStartX = sw / 2.0f - turretsPipsTotalW / 2.0f;
+    
+    DrawText2D("TURRETS:", turretsPipsStartX - 160.0f, botY + 18.0f, 0.85f, white);
+    
     for (int i = 0; i < 3; i++) {
         float px = turretsPipsStartX + i * (PIP_W + PIP_GAP);
-        std::string label = "T" + std::to_string(i + 1);
-        DrawText2D(label, px + PIP_W * 0.5f - textWidth(label, 0.55f) * 0.5f, botY + 6.0f, 0.55f, pipLabelColor);
         glm::vec3 pipColor;
         if (turretHealth[i] <= 0) pipColor = lostColor;
         else if (turretHealth[i] > 66) pipColor = slotColors[0];
         else if (turretHealth[i] > 33) pipColor = slotColors[1];
         else pipColor = slotColors[2];
-        drawPip2D(shaderProgram, quadVAO, quadFaceCount, px, botY + 30.0f, PIP_W, PIP_H, pipColor, sw, sh);
+        
+        drawPip2D(shaderProgram, quadVAO, quadFaceCount, px, botY + 17.0f, PIP_W, PIP_H, pipColor, sw, sh);
+        
+        std::string label = "T" + std::to_string(i + 1);
+        float lw = textWidth(label, 0.65f);
+        DrawText2D(label, px + PIP_W * 0.5f - lw * 0.5f, botY + 19.0f, 0.65f, pipLabelColor);
     }
 }
 

@@ -20,7 +20,8 @@ public:
     bool Initialize();
     void Shutdown();
 
-    void BeginFrame();
+    void BeginShadowPass(glm::vec3 lightPosition);
+    void BeginMainPass(glm::mat4 projection, glm::mat4 view, glm::vec3 cameraPos);
     void EndFrame();
 
     // Drawing functions
@@ -29,10 +30,7 @@ public:
     void DrawEnemy(const Enemy& enemy, glm::mat4 projection, glm::mat4 view);
     void DrawBullet(const Bullet& bullet, glm::mat4 projection, glm::mat4 view);
     void DrawTurret(const Turret& turret, glm::mat4 projection, glm::mat4 view);
-    void DrawShadows(const Player& p1, const Player& p2, 
-                    const std::vector<Enemy>& enemies,
-                    const std::vector<Turret>& turrets,
-                    glm::mat4 projection, glm::mat4 view);
+    // Removed fake DrawShadows function
 
     // HUD
     void DrawHUD(const Player& p1, const Player& p2, float gameTimer, 
@@ -44,15 +42,26 @@ public:
 private:
     int screenWidth, screenHeight;
     GLuint shaderProgram;
-    GLuint shadowShaderProgram;
+    GLuint shadowShaderProgram; // Used for depth map generation
+    GLuint depthMapFBO;
+    GLuint depthMap;
+    const unsigned int SHADOW_WIDTH = 2048, SHADOW_HEIGHT = 2048;
+
+    glm::mat4 lightSpaceMatrix;
+    glm::vec3 lightPos;
+    bool isShadowPass;
 
     // VAO/VBO untuk shapes
     GLuint cubeVAO, sphereVAO, cylinderVAO, quadVAO;
     GLuint floorTexture;
+    GLuint tankTexture;
+    GLuint turretTexture;
     unsigned int cubeFaceCount, sphereFaceCount, cylinderFaceCount, quadFaceCount;
 
     void SetupShapes();
     void DrawCube(glm::mat4 model, glm::vec3 color);
+    void DrawCubeTextured(glm::mat4 model, GLuint texture);
+    void DrawCylinderTextured(glm::mat4 model, GLuint texture);
     void DrawSphere(glm::mat4 model, glm::vec3 color, float radius = 1.0f);
     void DrawCylinder(glm::mat4 model, glm::vec3 color);
     void DrawQuad(glm::mat4 model, glm::vec3 color);
