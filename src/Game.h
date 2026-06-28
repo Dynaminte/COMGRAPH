@@ -25,7 +25,7 @@ private:
     int screenWidth, screenHeight;
 
     // Game state
-    enum GameState { MENU, PLAYING, GAME_OVER };
+    enum GameState { MENU, PLAYING, GAME_OVER, HOW_TO_PLAY };
     GameState gameState;
     float gameTimer;
     float waveTimer;
@@ -53,6 +53,7 @@ private:
     // HUD
     int score;
     int stars;
+    bool isWin;
 
     // Game logic
     void UpdateGameplay(float deltaTime);

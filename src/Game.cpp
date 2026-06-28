@@ -61,12 +61,55 @@ void Game::ProcessInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
+    static bool mousePressed = false;
+    bool mouseDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+
     if (gameState == MENU) {
-        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-            gameState = PLAYING;
-            ResetGame();
+        if (mouseDown && !mousePressed) {
+            double xpos, ypos;
+            glfwGetCursorPos(window, &xpos, &ypos);
+            int winW, winH;
+            glfwGetWindowSize(window, &winW, &winH);
+            float virtualX = (float)xpos / winW * screenWidth;
+            float virtualY = (float)ypos / winH * screenHeight;
+            
+            float cx = screenWidth / 2.0f;
+            float cy = screenHeight / 2.0f;
+            
+            // PLAY Button
+            if (virtualX >= cx - 60.0f && virtualX <= cx + 60.0f && virtualY >= cy + 90.0f && virtualY <= cy + 130.0f) {
+                gameState = PLAYING;
+                ResetGame();
+            }
+            // HOW TO PLAY Button
+            else if (virtualX >= cx - 120.0f && virtualX <= cx + 120.0f && virtualY >= cy + 150.0f && virtualY <= cy + 190.0f) {
+                gameState = HOW_TO_PLAY;
+            }
+            // QUIT Button
+            else if (virtualX >= cx - 60.0f && virtualX <= cx + 60.0f && virtualY >= cy + 210.0f && virtualY <= cy + 250.0f) {
+                glfwSetWindowShouldClose(window, true);
+            }
+        }
+    } else if (gameState == HOW_TO_PLAY) {
+        if (mouseDown && !mousePressed) {
+            double xpos, ypos;
+            glfwGetCursorPos(window, &xpos, &ypos);
+            int winW, winH;
+            glfwGetWindowSize(window, &winW, &winH);
+            float virtualX = (float)xpos / winW * screenWidth;
+            float virtualY = (float)ypos / winH * screenHeight;
+            
+            float cx = screenWidth / 2.0f;
+            float cy = screenHeight / 2.0f;
+            
+            // BACK Button
+            if (virtualX >= cx - 60.0f && virtualX <= cx + 60.0f && virtualY >= cy + 150.0f && virtualY <= cy + 190.0f) {
+                gameState = MENU;
+            }
         }
     }
+    
+    mousePressed = mouseDown;
 
     if (gameState == PLAYING) {
         // === PLAYER 1 (WASD) — 8-arah absolut ===
@@ -87,17 +130,18 @@ void Game::ProcessInput(GLFWwindow* window) {
             shootCooldown1 = SHOOT_COOLDOWN;
         }
 
-        // === PLAYER 2 (Arrow Keys) — 8-arah absolut ===
+        // === PLAYER 2 (IJKL) — 8-arah absolut ===
         float dx2 = 0.0f, dz2 = 0.0f;
-        if (glfwGetKey(window, GLFW_KEY_UP)    == GLFW_PRESS) dz2 -= 1.0f;
-        if (glfwGetKey(window, GLFW_KEY_DOWN)  == GLFW_PRESS) dz2 += 1.0f;
-        if (glfwGetKey(window, GLFW_KEY_LEFT)  == GLFW_PRESS) dx2 -= 1.0f;
-        if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) dx2 += 1.0f;
+        if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) dz2 -= 1.0f;
+        if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) dz2 += 1.0f;
+        if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) dx2 -= 1.0f;
+        if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) dx2 += 1.0f;
         player2.MoveInDirection(dx2, dz2, dt);
 
-        // Tembak P2 — tombol Enter / Numpad Enter
+        // Tembak P2 — tombol Enter / Numpad Enter / N
         if ((glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS ||
-             glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS) && shootCooldown2 <= 0.0f) {
+             glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS ||
+             glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS) && shootCooldown2 <= 0.0f) {
             glm::vec3 pos = player2.GetPosition();
             float rot = player2.GetRotation().y;
             glm::vec3 dir(-sinf(rot), 0.0f, -cosf(rot));
@@ -129,6 +173,8 @@ void Game::Update(float deltaTime) {
         case GAME_OVER:
             UpdateGameOver(deltaTime);
             break;
+        case HOW_TO_PLAY:
+            break; // no update needed
     }
 }
 
@@ -223,12 +269,28 @@ void Game::UpdateGameplay(float deltaTime) {
     }
 
     // Game over check
-    if (player1.GetHealth() <= 0 && player1.GetLives() <= 0 &&
-        player2.GetHealth() <= 0 && player2.GetLives() <= 0) {
+    bool allTurretsDead = true;
+    for (int i = 0; i < 3; i++) {
+        if (turretHealth[i] > 0) {
+            allTurretsDead = false;
+            break;
+        }
+    }
+
+    bool playersDead = (player1.GetHealth() <= 0 && player1.GetLives() <= 0 &&
+                        player2.GetHealth() <= 0 && player2.GetLives() <= 0);
+
+    bool timeUp = (gameTimer >= 60.0f); // 60 detik (1 menit) waktu bertahan
+
+    if (playersDead || allTurretsDead || timeUp) {
         gameState = GAME_OVER;
+        isWin = timeUp && !allTurretsDead;
         stars = 0;
-        for (int i = 0; i < 3; i++) {
-            if (turretHealth[i] > 0) stars++;
+        
+        if (isWin) {
+            for (int i = 0; i < 3; i++) {
+                if (turretHealth[i] > 0) stars++;
+            }
         }
     }
 
@@ -251,7 +313,7 @@ void Game::UpdateGameOver(float deltaTime) {
 
 void Game::SpawnEnemy() {
     float angle = (rand() % 360) * 3.14159f / 180.0f;
-    float distance = 20.0f;
+    float distance = 50.0f;
     glm::vec3 spawnPos(
         distance * cosf(angle),
         1.6f,  // Ketinggian terbang pesawat
@@ -275,6 +337,7 @@ void Game::CheckCollisions() {
                 );
                 if (dist < 2.2f) {
                     turretHealth[i] -= 5;
+                    turrets[i].TakeDamage(5);
                     if (turretHealth[i] <= 0) {
                         turretHealth[i] = 0;
                         turrets[i].Destroy();
@@ -339,6 +402,7 @@ void Game::CheckCollisions() {
             if (!turrets[i].IsAlive()) continue;
             if (glm::distance(enemy.GetPosition(), turrets[i].GetPosition()) < 2.2f) {
                 turretHealth[i] -= 10;
+                turrets[i].TakeDamage(10);
                 if (turretHealth[i] <= 0) {
                     turretHealth[i] = 0;
                     turrets[i].Destroy();
@@ -367,7 +431,7 @@ void Game::Render() {
     glm::mat4 projection = glm::perspective(glm::radians(45.0f),
                                            (float)screenWidth / screenHeight, 0.1f, 100.0f);
     glm::mat4 view = glm::lookAt(
-        glm::vec3(0.0f, 15.0f, 20.0f),  // camera position
+        glm::vec3(0.0f, 30.0f, 30.0f),  // camera position
         glm::vec3(0.0f, 0.0f, 0.0f),    // look at
         glm::vec3(0.0f, 1.0f, 0.0f)     // up
     );
@@ -401,7 +465,11 @@ void Game::Render() {
     if (gameState == PLAYING) {
         RenderHUD();
     } else if (gameState == GAME_OVER) {
-        renderer.DrawGameOverScreen(score, stars, currentWave);
+        renderer.DrawGameOverScreen(isWin, score, stars, currentWave);
+    } else if (gameState == MENU) {
+        renderer.DrawMenuScreen();
+    } else if (gameState == HOW_TO_PLAY) {
+        renderer.DrawHowToPlayScreen();
     }
 
     renderer.EndFrame();
@@ -432,6 +500,7 @@ void Game::ResetGame() {
     spawnTimer = 0;
     score = 0;
     stars = 0;
+    isWin = false;
 
     player1.Reset(P1_SPAWN.x, P1_SPAWN.y);
     player2.Reset(P2_SPAWN.x, P2_SPAWN.y);

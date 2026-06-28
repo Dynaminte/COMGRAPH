@@ -9,9 +9,7 @@ set(SOURCES
     src/main.cpp
     src/Game.cpp
     src/Player.cpp
-    src/Enemy.cpp
-    src/Bullet.cpp
-    src/Turret.cpp
+    src/Enemy_Bullet_Turret.cpp
     src/Renderer.cpp
 )
 

@@ -8,11 +8,15 @@
 #include <fstream>
 #include <sstream>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 // Simple vertex shader source
 const char* vertexShaderSource = R"(
 #version 410 core
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
+layout(location = 2) in vec2 texCoords;
 
 uniform mat4 model;
 uniform mat4 view;
@@ -20,11 +24,13 @@ uniform mat4 projection;
 
 out vec3 FragPos;
 out vec3 Normal;
+out vec2 TexCoords;
 
 void main()
 {
     FragPos = vec3(model * vec4(position, 1.0));
     Normal = mat3(transpose(inverse(model))) * normal;
+    TexCoords = texCoords;
     gl_Position = projection * view * vec4(FragPos, 1.0);
 }
 )";
@@ -34,23 +40,31 @@ const char* fragmentShaderSource = R"(
 #version 410 core
 in vec3 FragPos;
 in vec3 Normal;
+in vec2 TexCoords;
 
 uniform vec3 objectColor;
 uniform vec3 lightPos;
 uniform vec3 viewPos;
+uniform sampler2D texture_diffuse;
+uniform bool useTexture;
 
 out vec4 FragColor;
 
 void main()
 {
+    vec3 color = objectColor;
+    if (useTexture) {
+        color = texture(texture_diffuse, TexCoords * 33.0).rgb;
+    }
+
     // Ambient
-    vec3 ambient = 0.3 * objectColor;
+    vec3 ambient = 0.3 * color;
     
     // Diffuse
     vec3 norm = normalize(Normal);
     vec3 lightDir = normalize(lightPos - FragPos);
     float diff = max(dot(norm, lightDir), 0.0);
-    vec3 diffuse = diff * objectColor;
+    vec3 diffuse = diff * color;
     
     // Specular
     vec3 viewDir = normalize(viewPos - FragPos);
@@ -63,11 +77,45 @@ void main()
 }
 )";
 
+// Helper function to load texture
+static GLuint loadTexture(const char* path) {
+    GLuint textureID = 0;
+    int width, height, nrComponents;
+    stbi_set_flip_vertically_on_load(true);
+    unsigned char *data = stbi_load(path, &width, &height, &nrComponents, 0);
+    if (data) {
+        GLenum format = GL_RGB;
+        if (nrComponents == 1)
+            format = GL_RED;
+        else if (nrComponents == 3)
+            format = GL_RGB;
+        else if (nrComponents == 4)
+            format = GL_RGBA;
+
+        glGenTextures(1, &textureID);
+        glBindTexture(GL_TEXTURE_2D, textureID);
+        glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+        glGenerateMipmap(GL_TEXTURE_2D);
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+        stbi_image_free(data);
+        std::cout << "Successfully loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
+    } else {
+        std::cerr << "Texture failed to load at path: " << path << std::endl;
+    }
+    return textureID;
+}
+
 Renderer::Renderer(int width, int height)
     : screenWidth(width), screenHeight(height),
       shaderProgram(0), shadowShaderProgram(0),
       cubeVAO(0), sphereVAO(0), cylinderVAO(0), quadVAO(0),
-      cubeFaceCount(0), sphereFaceCount(0), cylinderFaceCount(0), quadFaceCount(0) {}
+      cubeFaceCount(0), sphereFaceCount(0), cylinderFaceCount(0), quadFaceCount(0),
+      floorTexture(0) {}
 
 Renderer::~Renderer() {
     Shutdown();
@@ -79,6 +127,13 @@ bool Renderer::Initialize() {
     if (shaderProgram == 0) {
         std::cerr << "Failed to create shader program!" << std::endl;
         return false;
+    }
+
+    // Load floor texture from asset folder
+    floorTexture = loadTexture("asset/sand2.jpeg");
+    if (floorTexture == 0) {
+        // Fallback to absolute path if relative doesn't work
+        floorTexture = loadTexture("../asset/sand2.jpeg");
     }
 
     // Setup 3D shapes
@@ -197,13 +252,13 @@ void Renderer::SetupShapes() {
 
     // 2. QUAD setup (for ground and UI)
     float quadVertices[] = {
-        // Position           // Normals
-        -0.5f, -0.5f, 0.0f,  0.0f, 0.0f, 1.0f,
-         0.5f, -0.5f, 0.0f,  0.0f, 0.0f, 1.0f,
-         0.5f,  0.5f, 0.0f,  0.0f, 0.0f, 1.0f,
-        -0.5f, -0.5f, 0.0f,  0.0f, 0.0f, 1.0f,
-         0.5f,  0.5f, 0.0f,  0.0f, 0.0f, 1.0f,
-        -0.5f,  0.5f, 0.0f,  0.0f, 0.0f, 1.0f
+        // Position           // Normals          // UV
+        -0.5f, -0.5f, 0.0f,  0.0f, 0.0f, 1.0f,   0.0f, 0.0f,
+         0.5f, -0.5f, 0.0f,  0.0f, 0.0f, 1.0f,   1.0f, 0.0f,
+         0.5f,  0.5f, 0.0f,  0.0f, 0.0f, 1.0f,   1.0f, 1.0f,
+        -0.5f, -0.5f, 0.0f,  0.0f, 0.0f, 1.0f,   0.0f, 0.0f,
+         0.5f,  0.5f, 0.0f,  0.0f, 0.0f, 1.0f,   1.0f, 1.0f,
+        -0.5f,  0.5f, 0.0f,  0.0f, 0.0f, 1.0f,   0.0f, 1.0f
     };
     quadFaceCount = 6;
     GLuint quadVBO;
@@ -212,10 +267,16 @@ void Renderer::SetupShapes() {
     glBindVertexArray(quadVAO);
     glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+    
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+    
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+    
     glBindVertexArray(0);
     glDeleteBuffers(1, &quadVBO);
 
@@ -617,6 +678,43 @@ static void drawBar2D(GLuint shaderProgram, GLuint quadVAO, unsigned int quadFac
     glEnable(GL_DEPTH_TEST);
 }
 
+// A bar with a dark bezel/border, a track background, and a colored fill
+// (proportional to pct, 0..1) drawn on top. Mimics the bordered HP bars
+// seen in the reference HUD mockup.
+static void drawBorderedBar2D(GLuint shaderProgram, GLuint quadVAO, unsigned int quadFaceCount,
+                               float x, float y, float w, float h, float pct, glm::vec3 fillColor,
+                               float screenWidth, float screenHeight) {
+    pct = pct < 0.0f ? 0.0f : (pct > 1.0f ? 1.0f : pct);
+    const float border = 2.0f;
+    // Outer bezel (slightly larger, near-black)
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, x - border, y - border, w + border * 2.0f, h + border * 2.0f,
+               glm::vec3(0.03f, 0.03f, 0.04f), screenWidth, screenHeight);
+    // Track background
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, x, y, w, h, glm::vec3(0.16f, 0.16f, 0.19f), screenWidth, screenHeight);
+    // Fill
+    if (pct > 0.0f) {
+        drawBar2D(shaderProgram, quadVAO, quadFaceCount, x, y, w * pct, h, fillColor, screenWidth, screenHeight);
+    }
+}
+
+// Small square "pip" indicator (used for life pips and turret status pips),
+// drawn with the same bordered look as drawBorderedBar2D but always fully filled.
+static void drawPip2D(GLuint shaderProgram, GLuint quadVAO, unsigned int quadFaceCount,
+                       float x, float y, float w, float h, glm::vec3 fillColor,
+                       float screenWidth, float screenHeight) {
+    const float border = 1.5f;
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, x - border, y - border, w + border * 2.0f, h + border * 2.0f,
+               glm::vec3(0.03f, 0.03f, 0.04f), screenWidth, screenHeight);
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, x, y, w, h, fillColor, screenWidth, screenHeight);
+}
+
+// Health-based color ramp: green when healthy, amber mid-way, red when low.
+static glm::vec3 healthColor(float pct) {
+    if (pct > 0.6f) return glm::vec3(0.25f, 0.78f, 0.30f);
+    if (pct > 0.3f) return glm::vec3(0.85f, 0.70f, 0.20f);
+    return glm::vec3(0.82f, 0.25f, 0.22f);
+}
+
 void Renderer::DrawGround(glm::mat4 projection, glm::mat4 view) {
     glUseProgram(shaderProgram);
     
@@ -625,12 +723,24 @@ void Renderer::DrawGround(glm::mat4 projection, glm::mat4 view) {
     
     // Horizontal ground is rotated X-Y plane flat onto X-Z
     glm::mat4 model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::scale(model, glm::vec3(60.0f, 60.0f, 1.0f));
+    model = glm::scale(model, glm::vec3(200.0f, 200.0f, 1.0f));
     
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
 
-    DrawQuad(model, glm::vec3(0.2f, 0.4f, 0.1f));
+    if (floorTexture != 0) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, floorTexture);
+        glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
+        glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
+    }
+
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, quadFaceCount);
+    glBindVertexArray(0);
 }
 
 void Renderer::DrawPlayer(const Player& player, glm::mat4 projection, glm::mat4 view) {
@@ -873,6 +983,7 @@ void Renderer::DrawTurret(const Turret& turret, glm::mat4 projection, glm::mat4 
 void Renderer::DrawCube(glm::mat4 model, glm::vec3 color) {
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
     glBindVertexArray(cubeVAO);
     glDrawArrays(GL_TRIANGLES, 0, cubeFaceCount);
     glBindVertexArray(0);
@@ -881,6 +992,7 @@ void Renderer::DrawCube(glm::mat4 model, glm::vec3 color) {
 void Renderer::DrawSphere(glm::mat4 model, glm::vec3 color, float radius) {
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
     glBindVertexArray(sphereVAO);
     glDrawArrays(GL_TRIANGLES, 0, sphereFaceCount);
     glBindVertexArray(0);
@@ -889,6 +1001,7 @@ void Renderer::DrawSphere(glm::mat4 model, glm::vec3 color, float radius) {
 void Renderer::DrawCylinder(glm::mat4 model, glm::vec3 color) {
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
     glBindVertexArray(cylinderVAO);
     glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount);
     glBindVertexArray(0);
@@ -897,6 +1010,7 @@ void Renderer::DrawCylinder(glm::mat4 model, glm::vec3 color) {
 void Renderer::DrawQuad(glm::mat4 model, glm::vec3 color) {
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
     glBindVertexArray(quadVAO);
     glDrawArrays(GL_TRIANGLES, 0, quadFaceCount);
     glBindVertexArray(0);
@@ -949,73 +1063,127 @@ void Renderer::DrawShadows(const Player& p1, const Player& p2,
 
 void Renderer::DrawHUD(const Player& p1, const Player& p2, float gameTimer,
                       float waveDuration, int* turretHealth, int score, int wave) {
-    // 1. HUD Background / Top panel
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, 60.0f, glm::vec3(0.08f, 0.08f, 0.12f), (float)screenWidth, (float)screenHeight);
+    // Estimate rendered width of a string at a given scale (matches the
+    // per-character advance used inside DrawText2D: charWidth + spacing).
+    auto textWidth = [](const std::string& s, float scale) {
+        return (float)s.size() * 16.0f * scale;
+    };
 
-    // 2. Player 1 HP Bar (Green panel left)
-    DrawText2D("P1", 20.0f, 10.0f, 1.0f);
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 50.0f, 15.0f, 150.0f, 15.0f, glm::vec3(0.2f, 0.2f, 0.2f), (float)screenWidth, (float)screenHeight);
-    if (p1.GetHealth() > 0) {
-        float hpPercent = (float)p1.GetHealth() / 100.0f;
-        drawBar2D(shaderProgram, quadVAO, quadFaceCount, 50.0f, 15.0f, 150.0f * hpPercent, 15.0f, glm::vec3(0.2f, 0.8f, 0.2f), (float)screenWidth, (float)screenHeight);
-    }
-    // Lives count (Hati)
+    glm::vec3 panelColor(0.05f, 0.05f, 0.08f);
+    glm::vec3 white(0.95f, 0.95f, 0.95f);
+    glm::vec3 amber(0.95f, 0.78f, 0.25f);
+    glm::vec3 slotColors[3] = {
+        glm::vec3(0.30f, 0.80f, 0.32f), // status 1 - green
+        glm::vec3(0.92f, 0.78f, 0.20f), // status 2 - amber
+        glm::vec3(0.86f, 0.30f, 0.26f)  // status 3 - red
+    };
+    glm::vec3 lostColor(0.20f, 0.20f, 0.23f);
+    glm::vec3 pipLabelColor(0.65f, 0.65f, 0.68f);
+
+    float sw = (float)screenWidth;
+    float sh = (float)screenHeight;
+
+    // ===================== TOP BAR =====================
+    const float TOP_H = 64.0f;
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, sw, TOP_H, panelColor, sw, sh);
+
+    // --- Player 1 (left): label, bordered HP bar, lives ---
+    DrawText2D("P1", 18.0f, 20.0f, 1.0f, glm::vec3(0.35f, 0.85f, 0.4f));
+    float p1BarX = 56.0f, p1BarY = 24.0f, p1BarW = 168.0f, p1BarH = 16.0f;
+    float p1Pct = p1.GetHealth() / 100.0f;
+    drawBorderedBar2D(shaderProgram, quadVAO, quadFaceCount, p1BarX, p1BarY, p1BarW, p1BarH, p1Pct, healthColor(p1Pct), sw, sh);
     std::string p1LivesText = "LIVES:" + std::to_string(p1.GetLives());
-    DrawText2D(p1LivesText, 210.0f, 12.0f, 0.8f);
+    DrawText2D(p1LivesText, p1BarX + p1BarW + 14.0f, 20.0f, 0.8f, amber);
 
-    // 3. Player 2 HP Bar (Blue panel right)
-    DrawText2D("P2", (float)screenWidth - 410.0f, 10.0f, 1.0f);
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, (float)screenWidth - 380.0f, 15.0f, 150.0f, 15.0f, glm::vec3(0.2f, 0.2f, 0.2f), (float)screenWidth, (float)screenHeight);
-    if (p2.GetHealth() > 0) {
-        float hpPercent = (float)p2.GetHealth() / 100.0f;
-        drawBar2D(shaderProgram, quadVAO, quadFaceCount, (float)screenWidth - 380.0f, 15.0f, 150.0f * hpPercent, 15.0f, glm::vec3(0.2f, 0.2f, 0.8f), (float)screenWidth, (float)screenHeight);
-    }
-    std::string p2LivesText = "LIVES:" + std::to_string(p2.GetLives());
-    DrawText2D(p2LivesText, (float)screenWidth - 220.0f, 12.0f, 0.8f);
-
-    // 4. Center Info: Score, Wave, Timer
+    // --- Center: Score / Wave / Time (dynamically centered as a group) ---
     std::string scoreText = "SCORE:" + std::to_string(score);
-    DrawText2D(scoreText, (float)screenWidth / 2.0f - 180.0f, 10.0f, 1.0f);
-
     std::string waveText = "WAVE:" + std::to_string(wave);
-    DrawText2D(waveText, (float)screenWidth / 2.0f - 30.0f, 10.0f, 1.0f);
+    const float TOTAL_TIME = 60.0f;
+    float remaining = std::max(0.0f, TOTAL_TIME - gameTimer);
+    int mins = (int)(remaining / 60.0f);
+    int secs = (int)(remaining) % 60;
+    char timeBuf[16];
+    snprintf(timeBuf, sizeof(timeBuf), "%01d:%02d", mins, secs);
+    std::string timerText = std::string("TIME:") + timeBuf;
 
-    int seconds = (int)gameTimer;
-    std::string timerText = "TIME:" + std::to_string(seconds) + "S";
-    DrawText2D(timerText, (float)screenWidth / 2.0f + 70.0f, 10.0f, 1.0f);
+    {
+        float gap = 36.0f, scale = 0.9f;
+        float totalW = textWidth(scoreText, scale) + gap + textWidth(waveText, scale) + gap + textWidth(timerText, scale);
+        float cx = sw / 2.0f - totalW / 2.0f;
+        DrawText2D(scoreText, cx, 20.0f, scale, white);
+        cx += textWidth(scoreText, scale) + gap;
+        DrawText2D(waveText, cx, 20.0f, scale, white);
+        cx += textWidth(waveText, scale) + gap;
+        DrawText2D(timerText, cx, 20.0f, scale, white);
+    }
 
-    // 5. Turret Health Bars at the bottom
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, (float)screenHeight - 40.0f, (float)screenWidth, 40.0f, glm::vec3(0.08f, 0.08f, 0.12f), (float)screenWidth, (float)screenHeight);
-    
-    DrawText2D("TURRETS:", 20.0f, (float)screenHeight - 30.0f, 0.9f);
-    
-    float barWidth = 120.0f;
-    float startX = 120.0f;
+    // --- Player 2 (right, mirrored): lives, bordered HP bar, label ---
+    float p2BarW = 168.0f, p2BarH = 16.0f, p2BarY = 24.0f;
+    float p2BarX = sw - 56.0f - p2BarW;
+    float p2Pct = p2.GetHealth() / 100.0f;
+    std::string p2LivesText = "LIVES:" + std::to_string(p2.GetLives());
+    DrawText2D(p2LivesText, p2BarX - 14.0f - textWidth(p2LivesText, 0.8f), 20.0f, 0.8f, amber);
+    drawBorderedBar2D(shaderProgram, quadVAO, quadFaceCount, p2BarX, p2BarY, p2BarW, p2BarH, p2Pct, healthColor(p2Pct), sw, sh);
+    DrawText2D("P2", p2BarX + p2BarW + 14.0f, 20.0f, 1.0f, glm::vec3(0.35f, 0.6f, 0.95f));
+
+    // ===================== BOTTOM BAR =====================
+    const float BOT_H = 54.0f;
+    float botY = sh - BOT_H;
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, botY, sw, BOT_H, panelColor, sw, sh);
+
+    const float PIP_W = 32.0f, PIP_H = 13.0f, PIP_GAP = 14.0f;
+
+    // --- Left: LIVES pips for Player 1 (one pip per remaining life) ---
+    DrawText2D("LIVES:", 18.0f, botY + 19.0f, 0.8f, white);
+    float livesStartX = 18.0f + textWidth("LIVES:", 0.8f) + 16.0f;
     for (int i = 0; i < 3; i++) {
-        float tx = startX + i * (barWidth + 40.0f);
-        float ty = (float)screenHeight - 28.0f;
-        
-        std::string labelText = "T" + std::to_string(i + 1) + ":";
-        DrawText2D(labelText, tx, ty - 2.0f, 0.8f);
-        
-        drawBar2D(shaderProgram, quadVAO, quadFaceCount, tx + 30.0f, ty, barWidth, 12.0f, glm::vec3(0.2f, 0.2f, 0.2f), (float)screenWidth, (float)screenHeight);
-        if (turretHealth[i] > 0) {
-            float thPercent = (float)turretHealth[i] / 100.0f;
-            drawBar2D(shaderProgram, quadVAO, quadFaceCount, tx + 30.0f, ty, barWidth * thPercent, 12.0f, glm::vec3(0.8f, 0.8f, 0.2f), (float)screenWidth, (float)screenHeight);
-        } else {
-            DrawText2D("DESTROYED", tx + 30.0f, ty - 2.0f, 0.6f);
-        }
+        float px = livesStartX + i * (PIP_W + PIP_GAP);
+        std::string label = "T" + std::to_string(i + 1);
+        DrawText2D(label, px + PIP_W * 0.5f - textWidth(label, 0.55f) * 0.5f, botY + 6.0f, 0.55f, pipLabelColor);
+        bool alive = p1.GetLives() > i;
+        drawPip2D(shaderProgram, quadVAO, quadFaceCount, px, botY + 30.0f, PIP_W, PIP_H, alive ? slotColors[i] : lostColor, sw, sh);
+    }
+
+    // --- Center: Wave / Time (mirrored from the top bar) ---
+    {
+        float gap = 36.0f, scale = 0.85f;
+        float totalW = textWidth(waveText, scale) + gap + textWidth(timerText, scale);
+        float cx = sw / 2.0f - totalW / 2.0f;
+        DrawText2D(waveText, cx, botY + 19.0f, scale, white);
+        cx += textWidth(waveText, scale) + gap;
+        DrawText2D(timerText, cx, botY + 19.0f, scale, white);
+    }
+
+    // --- Right: TURRETS status pips (green/amber/red by health, gray if destroyed) ---
+    float turretsPipsTotalW = 3.0f * PIP_W + 2.0f * PIP_GAP;
+    float turretsPipsStartX = sw - 18.0f - turretsPipsTotalW;
+    std::string turretsLabel = "TURRETS";
+    DrawText2D(turretsLabel, turretsPipsStartX - 16.0f - textWidth(turretsLabel, 0.8f), botY + 19.0f, 0.8f, white);
+    for (int i = 0; i < 3; i++) {
+        float px = turretsPipsStartX + i * (PIP_W + PIP_GAP);
+        std::string label = "T" + std::to_string(i + 1);
+        DrawText2D(label, px + PIP_W * 0.5f - textWidth(label, 0.55f) * 0.5f, botY + 6.0f, 0.55f, pipLabelColor);
+        glm::vec3 pipColor;
+        if (turretHealth[i] <= 0) pipColor = lostColor;
+        else if (turretHealth[i] > 66) pipColor = slotColors[0];
+        else if (turretHealth[i] > 33) pipColor = slotColors[1];
+        else pipColor = slotColors[2];
+        drawPip2D(shaderProgram, quadVAO, quadFaceCount, px, botY + 30.0f, PIP_W, PIP_H, pipColor, sw, sh);
     }
 }
 
-void Renderer::DrawGameOverScreen(int score, int stars, int wave) {
+void Renderer::DrawGameOverScreen(bool isWin, int score, int stars, int wave) {
     // Semitransparent black background
     drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.05f, 0.05f, 0.08f), (float)screenWidth, (float)screenHeight);
 
     float centerX = (float)screenWidth / 2.0f;
     float centerY = (float)screenHeight / 2.0f;
 
-    DrawText2D("GAME OVER", centerX - 140.0f, centerY - 120.0f, 2.5f);
+    if (isWin) {
+        DrawText2D("VICTORY!", centerX - 120.0f, centerY - 120.0f, 2.5f, glm::vec3(0.2f, 0.8f, 0.2f));
+    } else {
+        DrawText2D("GAME OVER", centerX - 140.0f, centerY - 120.0f, 2.5f, glm::vec3(0.86f, 0.30f, 0.26f));
+    }
     
     std::string waveText = "FINAL WAVE: " + std::to_string(wave);
     DrawText2D(waveText, centerX - 110.0f, centerY - 40.0f, 1.2f);
@@ -1026,12 +1194,12 @@ void Renderer::DrawGameOverScreen(int score, int stars, int wave) {
     std::string starsText = "STARS: ";
     for (int i = 0; i < stars; i++) starsText += "* ";
     if (stars == 0) starsText += "NONE";
-    DrawText2D(starsText, centerX - 80.0f, centerY + 40.0f, 1.2f);
+    DrawText2D(starsText, centerX - 80.0f, centerY + 40.0f, 1.2f, glm::vec3(0.95f, 0.78f, 0.25f));
     
     DrawText2D("PRESS SPACE TO RETURN TO MENU", centerX - 250.0f, centerY + 120.0f, 1.0f);
 }
 
-void Renderer::DrawText2D(const std::string& text, float x, float y, float scale) {
+void Renderer::DrawText2D(const std::string& text, float x, float y, float scale, glm::vec3 color) {
     glDisable(GL_DEPTH_TEST);
     
     std::vector<float> lineVertices;
@@ -1068,13 +1236,55 @@ void Renderer::DrawText2D(const std::string& text, float x, float y, float scale
     }
     
     if (!lineVertices.empty()) {
-        drawLineList(shaderProgram, lineVertices, glm::vec3(1.0f, 1.0f, 1.0f));
+        drawLineList(shaderProgram, lineVertices, color);
     }
     
     glEnable(GL_DEPTH_TEST);
 }
 
+void Renderer::DrawMenuScreen() {
+    float cx = screenWidth / 2.0f;
+    float cy = screenHeight / 2.0f;
+    
+    DrawText2D("TANK DEFENDER 3D", cx - 180.0f, cy - 100.0f, 1.5f, glm::vec3(0.9f, 0.9f, 0.1f));
+    
+    // Play Button
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 60.0f, cy + 90.0f, 120.0f, 40.0f, glm::vec3(0.2f, 0.6f, 0.2f), screenWidth, screenHeight);
+    DrawText2D("PLAY", cx - 35.0f, cy + 105.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f));
+    
+    // How To Play Button
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 120.0f, cy + 150.0f, 240.0f, 40.0f, glm::vec3(0.2f, 0.4f, 0.6f), screenWidth, screenHeight);
+    DrawText2D("HOW TO PLAY", cx - 100.0f, cy + 165.0f, 1.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+    
+    // Quit Button
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 60.0f, cy + 210.0f, 120.0f, 40.0f, glm::vec3(0.6f, 0.2f, 0.2f), screenWidth, screenHeight);
+    DrawText2D("QUIT", cx - 35.0f, cy + 225.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f));
+}
+
+void Renderer::DrawHowToPlayScreen() {
+    float cx = screenWidth / 2.0f;
+    float cy = screenHeight / 2.0f;
+    
+    // Draw background
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.0f, 0.0f, 0.0f), screenWidth, screenHeight);
+
+    DrawText2D("HOW TO PLAY", cx - 120.0f, cy - 100.0f, 1.2f, glm::vec3(0.9f, 0.9f, 0.1f));
+    
+    DrawText2D("P1 (GREEN): WASD TO MOVE, F TO SHOOT", cx - 250.0f, cy - 30.0f, 0.8f, glm::vec3(0.3f, 0.8f, 0.3f));
+    DrawText2D("P2 (BLUE) : IJKL TO MOVE, ENTER/N TO SHOOT", cx - 250.0f, cy + 10.0f, 0.8f, glm::vec3(0.3f, 0.6f, 0.9f));
+    DrawText2D("DEFEND THE 3 TURRETS FROM ENEMIES!", cx - 230.0f, cy + 50.0f, 0.8f, glm::vec3(0.9f, 0.8f, 0.2f));
+    DrawText2D("IF ALL TURRETS ARE DESTROYED, YOU LOSE.", cx - 250.0f, cy + 80.0f, 0.8f, glm::vec3(0.8f, 0.3f, 0.3f));
+    
+    // Back Button
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 60.0f, cy + 150.0f, 120.0f, 40.0f, glm::vec3(0.4f, 0.4f, 0.4f), screenWidth, screenHeight);
+    DrawText2D("BACK", cx - 35.0f, cy + 165.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f));
+}
+
 void Renderer::Shutdown() {
+    if (floorTexture != 0) {
+        glDeleteTextures(1, &floorTexture);
+        floorTexture = 0;
+    }
     if (shaderProgram != 0) {
         glDeleteProgram(shaderProgram);
     }

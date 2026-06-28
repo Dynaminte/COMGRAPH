@@ -37,7 +37,9 @@ public:
     // HUD
     void DrawHUD(const Player& p1, const Player& p2, float gameTimer, 
                 float waveDuration, int* turretHealth, int score, int wave);
-    void DrawGameOverScreen(int score, int stars, int wave);
+    void DrawGameOverScreen(bool isWin, int score, int stars, int wave);
+    void DrawMenuScreen();
+    void DrawHowToPlayScreen();
 
 private:
     int screenWidth, screenHeight;
@@ -46,6 +48,7 @@ private:
 
     // VAO/VBO untuk shapes
     GLuint cubeVAO, sphereVAO, cylinderVAO, quadVAO;
+    GLuint floorTexture;
     unsigned int cubeFaceCount, sphereFaceCount, cylinderFaceCount, quadFaceCount;
 
     void SetupShapes();
@@ -53,7 +56,7 @@ private:
     void DrawSphere(glm::mat4 model, glm::vec3 color, float radius = 1.0f);
     void DrawCylinder(glm::mat4 model, glm::vec3 color);
     void DrawQuad(glm::mat4 model, glm::vec3 color);
-    void DrawText2D(const std::string& text, float x, float y, float scale);
+    void DrawText2D(const std::string& text, float x, float y, float scale, glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f));
 
     GLuint CompileShader(const char* source, GLenum shaderType);
     GLuint CreateShaderProgram(const char* vertexSrc, const char* fragmentSrc);
