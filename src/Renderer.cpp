@@ -607,6 +607,11 @@ void Renderer::BeginMainPass(glm::mat4 projection, glm::mat4 view, glm::vec3 cam
 
 void Renderer::EndFrame() {}
 
+void Renderer::Resize(int width, int height) {
+    screenWidth = width;
+    screenHeight = height;
+}
+
 // --- Local Helpers for 2D UI and Font Rendering ---
 struct Point2D { float x, y; };
 struct Line2D { Point2D p1, p2; };
@@ -817,6 +822,7 @@ static void drawLineList(GLuint shaderProgram, const std::vector<float>& vertice
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(identity));
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(identity));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0); // 0 = no texture
     
     glLineWidth(2.5f);
     glDrawArrays(GL_LINES, 0, vertices.size() / 6);
@@ -843,6 +849,7 @@ static void drawBar2D(GLuint shaderProgram, GLuint quadVAO, unsigned int quadFac
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(identity));
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(identity));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0); // 0 = no texture
     
     glBindVertexArray(quadVAO);
     glDrawArrays(GL_TRIANGLES, 0, quadFaceCount);
@@ -892,7 +899,8 @@ void Renderer::DrawGround(glm::mat4 projection, glm::mat4 view) {
     GLuint currentProg = isShadowPass ? shadowShaderProgram : shaderProgram;
     glUseProgram(currentProg);
     
-    glm::mat4 model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    // Rotate -90 degrees so normal (0,0,1) becomes (0,1,0) pointing UP.
+    glm::mat4 model = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
     model = glm::scale(model, glm::vec3(200.0f, 200.0f, 1.0f));
     glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(model));
 
@@ -998,13 +1006,6 @@ void Renderer::DrawEnemy(const Enemy& enemy, glm::mat4 projection, glm::mat4 vie
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
     model = glm::rotate(model, enemy.GetRotation(), glm::vec3(0.0f, 1.0f, 0.0f));
 
-    if (!isShadowPass) {
-        glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
-        glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-    }
-
     // Colors (hanya main pass)
     glm::vec3 planeColor(0.85f, 0.15f, 0.15f);
     glm::vec3 wingColor(0.88f, 0.88f, 0.88f);
@@ -1099,14 +1100,6 @@ void Renderer::DrawTurret(const Turret& turret, glm::mat4 projection, glm::mat4 
 
     glm::vec3 pos = turret.GetPosition();
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
-
-    if (!isShadowPass) {
-        // Hanya set uniform ini di main pass
-        glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
-        glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-    }
 
     // Warna turret: aktif=gold, hancur=abu
     glm::vec3 goldColor(0.80f, 0.68f, 0.18f);
@@ -1404,6 +1397,7 @@ void Renderer::DrawGameOverScreen(bool isWin, int score, int stars, int wave) {
     DrawText2D(starsText, centerX - 80.0f, centerY + 40.0f, 1.2f, glm::vec3(0.95f, 0.78f, 0.25f));
     
     DrawText2D("PRESS SPACE TO RETURN TO MENU", centerX - 250.0f, centerY + 120.0f, 1.0f);
+    DrawText2D("PRESS R TO RESTART", centerX - 150.0f, centerY + 160.0f, 1.0f);
 }
 
 void Renderer::DrawText2D(const std::string& text, float x, float y, float scale, glm::vec3 color) {

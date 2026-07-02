@@ -19,6 +19,7 @@ public:
     void Update(float deltaTime);
     void Render();
     void Shutdown();
+    void Resize(int width, int height);
 
 private:
     // Screen

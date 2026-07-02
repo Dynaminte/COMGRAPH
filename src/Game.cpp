@@ -68,10 +68,11 @@ void Game::ProcessInput(GLFWwindow* window) {
         if (mouseDown && !mousePressed) {
             double xpos, ypos;
             glfwGetCursorPos(window, &xpos, &ypos);
-            // Gunakan window size (bukan framebuffer) untuk mapping cursor ke virtual coords
+            
             int winW, winH;
             glfwGetWindowSize(window, &winW, &winH);
             if (winW <= 0 || winH <= 0) { mousePressed = mouseDown; return; }
+            
             float virtualX = (float)(xpos / winW) * screenWidth;
             float virtualY = (float)(ypos / winH) * screenHeight;
 
@@ -99,9 +100,11 @@ void Game::ProcessInput(GLFWwindow* window) {
         if (mouseDown && !mousePressed) {
             double xpos, ypos;
             glfwGetCursorPos(window, &xpos, &ypos);
+            
             int winW, winH;
             glfwGetWindowSize(window, &winW, &winH);
             if (winW <= 0 || winH <= 0) { mousePressed = mouseDown; return; }
+            
             float virtualX = (float)(xpos / winW) * screenWidth;
             float virtualY = (float)(ypos / winH) * screenHeight;
 
@@ -165,6 +168,10 @@ void Game::ProcessInput(GLFWwindow* window) {
     if (gameState == GAME_OVER) {
         if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
             gameState = MENU;
+        }
+        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
+            gameState = PLAYING;
+            ResetGame();
         }
     }
 }
@@ -522,4 +529,10 @@ void Game::ResetGame() {
         turrets.push_back(Turret(turretPositions[i], 100));
         turretHealth[i] = 100;
     }
+}
+
+void Game::Resize(int width, int height) {
+    screenWidth = width;
+    screenHeight = height;
+    renderer.Resize(width, height);
 }

@@ -23,6 +23,7 @@ public:
     void BeginShadowPass(glm::vec3 lightPosition);
     void BeginMainPass(glm::mat4 projection, glm::mat4 view, glm::vec3 cameraPos);
     void EndFrame();
+    void Resize(int width, int height);
 
     // Drawing functions
     void DrawGround(glm::mat4 projection, glm::mat4 view);
