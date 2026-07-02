@@ -218,47 +218,74 @@ void Game::UpdateGameplay(float deltaTime) {
     // Update enemies
     for (auto& enemy : enemies) {
         enemy.Update(deltaTime);
-        
-        // Musuh mengejar turret atau tank terdekat yang masih aktif
-        float minDist = 1000.0f;
+
+        const float TANK_AGGRO_RANGE  = 12.0f; // radius musuh mulai kejar tank
+        const float TANK_SHOOT_RANGE  = 14.0f; // radius musuh tembak tank
+
+        glm::vec3 enemyPos = enemy.GetPosition();
         glm::vec3 targetPos(0.0f, 0.0f, 0.0f);
         bool hasTarget = false;
+        float minDist = 1000.0f;
 
-        for (auto& turret : turrets) {
-            if (!turret.IsAlive()) continue; // Skip turret yang sudah hancur
-            float dist = glm::distance(enemy.GetPosition(), turret.GetPosition());
-            if (dist < minDist) {
-                minDist = dist;
-                targetPos = turret.GetPosition();
-                hasTarget = true;
+        // --- Cek apakah tank player cukup dekat (aggro range) ---
+        float distP1 = (player1.GetHealth() > 0)
+            ? glm::distance(enemyPos, glm::vec3(player1.GetPosition().x, enemyPos.y, player1.GetPosition().z))
+            : 9999.0f;
+        float distP2 = (player2.GetHealth() > 0)
+            ? glm::distance(enemyPos, glm::vec3(player2.GetPosition().x, enemyPos.y, player2.GetPosition().z))
+            : 9999.0f;
+
+        float nearestPlayerDist = std::min(distP1, distP2);
+
+        if (nearestPlayerDist <= TANK_AGGRO_RANGE) {
+            // Kejar tank terdekat — tank diprioritaskan jika dalam jangkauan aggro
+            if (distP1 <= distP2 && player1.GetHealth() > 0) {
+                targetPos = glm::vec3(player1.GetPosition().x, enemyPos.y, player1.GetPosition().z);
+            } else if (player2.GetHealth() > 0) {
+                targetPos = glm::vec3(player2.GetPosition().x, enemyPos.y, player2.GetPosition().z);
             }
-        }
-
-        // Cek player juga
-        float p1Dist = glm::distance(enemy.GetPosition(), player1.GetPosition());
-        float p2Dist = glm::distance(enemy.GetPosition(), player2.GetPosition());
-
-        if (p1Dist < minDist) {
-            minDist = p1Dist;
-            targetPos = player1.GetPosition();
             hasTarget = true;
-        }
-        if (p2Dist < minDist) {
-            minDist = p2Dist;
-            targetPos = player2.GetPosition();
-            hasTarget = true;
-        }
 
-        if (hasTarget) {
-            enemy.MoveTowards(targetPos, 5.0f);
-            
-            // Enemy shooting logic - shoots a bullet towards the target
-            if (enemy.CanShoot()) {
-                glm::vec3 enemyPos = enemy.GetPosition();
+            // Tembak tank jika dalam jarak tembak
+            if (enemy.CanShoot() && nearestPlayerDist <= TANK_SHOOT_RANGE) {
                 glm::vec3 shootDir = glm::normalize(targetPos - enemyPos);
-                bullets.push_back(Bullet(enemyPos, shootDir, true)); // true = isEnemyBullet
+                bullets.push_back(Bullet(enemyPos, shootDir, true));
                 enemy.ResetShootCooldown();
             }
+        } else {
+            // Di luar aggro range — kejar turret terdekat yang masih hidup
+            for (auto& turret : turrets) {
+                if (!turret.IsAlive()) continue;
+                float dist = glm::distance(enemyPos, turret.GetPosition());
+                if (dist < minDist) {
+                    minDist = dist;
+                    targetPos = turret.GetPosition();
+                    hasTarget = true;
+                }
+            }
+            // Fallback: jika semua turret hancur, kejar player manapun
+            if (!hasTarget) {
+                if (player1.GetHealth() > 0) {
+                    targetPos = glm::vec3(player1.GetPosition().x, enemyPos.y, player1.GetPosition().z);
+                } else {
+                    targetPos = glm::vec3(player2.GetPosition().x, enemyPos.y, player2.GetPosition().z);
+                }
+                hasTarget = true;
+            }
+
+            // Tembak turret jika sudah dekat (dalam jarak 18 unit)
+            if (enemy.CanShoot() && minDist <= 18.0f) {
+                glm::vec3 shootDir = glm::normalize(targetPos - enemyPos);
+                bullets.push_back(Bullet(enemyPos, shootDir, true));
+                enemy.ResetShootCooldown();
+            }
+        }
+
+        // Gerak menuju target
+        if (hasTarget) {
+            // Kecepatan musuh meningkat per wave: wave1=3.5, wave2=4.0, wave3=4.5, dst
+            float enemySpeed = (3.0f + currentWave * 0.5f) * deltaTime;
+            enemy.MoveTowards(targetPos, enemySpeed);
         }
     }
 
@@ -270,16 +297,14 @@ void Game::UpdateGameplay(float deltaTime) {
     // Check collisions
     CheckCollisions();
 
-    // Wave management - Escalates enemies and speeds up spawning
-    if (waveTimer >= WAVE_DURATION) {
-        if (enemies.empty() && spawnedCount >= maxEnemies) {
-            currentWave++;
-            maxEnemies = 8 + currentWave * 4;
-            spawnDelay = std::max(0.4f, 1.5f - currentWave * 0.15f);
-            spawnedCount = 0;
-            waveTimer = 0;
-            spawnTimer = 0;
-        }
+    // Wave management: naik wave segera setelah SEMUA musuh di wave ini habis
+    if (spawnedCount >= maxEnemies && enemies.empty()) {
+        currentWave++;
+        maxEnemies = 8 + currentWave * 4;       // wave 2 = 16, wave 3 = 20, dst
+        spawnDelay = std::max(0.3f, 1.5f - currentWave * 0.15f); // makin cepat spawn
+        spawnedCount = 0;
+        waveTimer = 0;
+        spawnTimer = 0;
     }
 
     // Game over check
@@ -333,7 +358,10 @@ void Game::SpawnEnemy() {
         1.6f,  // Ketinggian terbang pesawat
         distance * sinf(angle)
     );
-    enemies.push_back(Enemy(spawnPos, 3));  // 3 HP (butuh 3 kali hit)
+    // HP dan speed musuh meningkat per wave
+    int enemyHP  = 3 + (currentWave - 1);          // wave1=3, wave2=4, wave3=5...
+    // speed dikontrol di MoveTowards tiap frame, bukan di konstruktor
+    enemies.push_back(Enemy(spawnPos, enemyHP));
     spawnedCount++;
 }
 

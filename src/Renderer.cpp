@@ -68,6 +68,7 @@ in vec2 TexCoords;
 in vec4 FragPosLightSpace;
 
 uniform vec3 objectColor;
+uniform float objectAlpha;
 uniform vec3 lightPos;
 uniform vec3 viewPos;
 uniform sampler2D texture_diffuse;
@@ -99,7 +100,8 @@ void main()
     vec3 color = objectColor;
     if (useTexture == 1) {
         // Ground texture - tiled
-        color = clamp(texture(texture_diffuse, TexCoords * 20.0).rgb, 0.0, 1.0);
+        // Darken the ground slightly to make UI and shadows pop out more
+        color = clamp(texture(texture_diffuse, TexCoords * 20.0).rgb, 0.0, 1.0) * 0.45;
     } else if (useTexture == 2) {
         // Object texture (tank/turret) - no tiling
         vec4 texColor = texture(texture_diffuse, TexCoords);
@@ -124,7 +126,7 @@ void main()
     float shadow = ShadowCalculation(FragPosLightSpace, norm, lightDir);
     
     vec3 result = ambient + (1.0 - shadow) * (diffuse + specular);
-    FragColor = vec4(clamp(result, 0.0, 1.0), 1.0);
+    FragColor = vec4(clamp(result, 0.0, 1.0), objectAlpha);
 }
 )";
 
@@ -189,6 +191,11 @@ bool Renderer::Initialize() {
         std::cerr << "Failed to create shader programs!" << std::endl;
         return false;
     }
+    
+    // Set default alpha to 1.0
+    glUseProgram(shaderProgram);
+    glUniform1f(glGetUniformLocation(shaderProgram, "objectAlpha"), 1.0f);
+    glUseProgram(0);
 
     // Configure depth map FBO
     glGenFramebuffers(1, &depthMapFBO);
@@ -883,8 +890,12 @@ static void drawLineList(GLuint shaderProgram, const std::vector<float>& vertice
     glDeleteVertexArrays(1, &tempVAO);
 }
 
-static void drawBar2D(GLuint shaderProgram, GLuint quadVAO, unsigned int quadFaceCount, float x, float y, float w, float h, glm::vec3 color, float screenWidth, float screenHeight) {
+static void drawBar2D(GLuint shaderProgram, GLuint quadVAO, unsigned int quadFaceCount, float x, float y, float w, float h, glm::vec3 color, float screenWidth, float screenHeight, float alpha = 1.0f) {
     glDisable(GL_DEPTH_TEST);
+    
+    // Enable blending for transparency
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     
     float nw = w / screenWidth * 2.0f;
     float nh = h / screenHeight * 2.0f;
@@ -900,12 +911,16 @@ static void drawBar2D(GLuint shaderProgram, GLuint quadVAO, unsigned int quadFac
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(identity));
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(identity));
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
+    glUniform1f(glGetUniformLocation(shaderProgram, "objectAlpha"), alpha);
     glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0); // 0 = no texture
     
     glBindVertexArray(quadVAO);
     glDrawArrays(GL_TRIANGLES, 0, quadFaceCount);
     glBindVertexArray(0);
     
+    // Reset alpha
+    glUniform1f(glGetUniformLocation(shaderProgram, "objectAlpha"), 1.0f);
+    glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -1425,7 +1440,7 @@ void Renderer::DrawHUD(const Player& p1, const Player& p2, float gameTimer,
 
 void Renderer::DrawGameOverScreen(bool isWin, int score, int stars, int wave) {
     // Semitransparent black background
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.05f, 0.05f, 0.08f), (float)screenWidth, (float)screenHeight);
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.05f, 0.05f, 0.08f), (float)screenWidth, (float)screenHeight, 0.85f);
 
     float centerX = (float)screenWidth / 2.0f;
     float centerY = (float)screenHeight / 2.0f;
@@ -1498,18 +1513,21 @@ void Renderer::DrawMenuScreen() {
     float cx = screenWidth / 2.0f;
     float cy = screenHeight / 2.0f;
     
+    // Overlay semi-transparan gelap agar menu pop-out dari game background
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.0f, 0.0f, 0.0f), screenWidth, screenHeight, 0.75f);
+
     DrawText2D("TANK DEFENDER 3D", cx - 180.0f, cy - 100.0f, 1.5f, glm::vec3(0.9f, 0.9f, 0.1f), 5.0f);
     
     // Play Button
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 70.0f, cy + 90.0f, 140.0f, 40.0f, glm::vec3(0.2f, 0.6f, 0.2f), screenWidth, screenHeight);
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 70.0f, cy + 90.0f, 140.0f, 40.0f, glm::vec3(0.2f, 0.6f, 0.2f), screenWidth, screenHeight, 0.9f);
     DrawText2D("PLAY", cx - 35.0f, cy + 105.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f), 4.0f);
     
     // How To Play Button
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 130.0f, cy + 150.0f, 260.0f, 40.0f, glm::vec3(0.2f, 0.4f, 0.6f), screenWidth, screenHeight);
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 130.0f, cy + 150.0f, 260.0f, 40.0f, glm::vec3(0.2f, 0.4f, 0.6f), screenWidth, screenHeight, 0.9f);
     DrawText2D("HOW TO PLAY", cx - 100.0f, cy + 165.0f, 1.0f, glm::vec3(1.0f, 1.0f, 1.0f), 4.0f);
     
     // Quit Button
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 70.0f, cy + 210.0f, 140.0f, 40.0f, glm::vec3(0.6f, 0.2f, 0.2f), screenWidth, screenHeight);
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 70.0f, cy + 210.0f, 140.0f, 40.0f, glm::vec3(0.6f, 0.2f, 0.2f), screenWidth, screenHeight, 0.9f);
     DrawText2D("QUIT", cx - 35.0f, cy + 225.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f), 4.0f);
 }
 
@@ -1517,8 +1535,8 @@ void Renderer::DrawHowToPlayScreen() {
     float cx = screenWidth / 2.0f;
     float cy = screenHeight / 2.0f;
     
-    // Draw background
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.05f, 0.05f, 0.08f), screenWidth, screenHeight);
+    // Draw background dengan transparansi kuat
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.05f, 0.05f, 0.08f), screenWidth, screenHeight, 0.85f);
 
     DrawText2D("HOW TO PLAY", cx - 120.0f, cy - 100.0f, 1.2f, glm::vec3(0.9f, 0.9f, 0.1f), 4.5f);
     

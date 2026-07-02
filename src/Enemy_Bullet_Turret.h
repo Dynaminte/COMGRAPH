@@ -6,7 +6,7 @@
 
 class Enemy {
 public:
-    Enemy(glm::vec3 spawnPos, int hp);
+    Enemy(glm::vec3 spawnPos, int hp, float speed = 3.0f);
     ~Enemy();
 
     void Update(float deltaTime);

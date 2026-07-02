@@ -3,8 +3,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 
-Enemy::Enemy(glm::vec3 spawnPos, int hp)
-    : position(spawnPos), rotation(0.0f), health(hp), moveSpeed(3.0f) {
+Enemy::Enemy(glm::vec3 spawnPos, int hp, float speed)
+    : position(spawnPos), rotation(0.0f), health(hp), moveSpeed(speed) {
     // Randomize initial cooldown between 0.5 and 2.5 seconds to stagger shots
     shootCooldown = 0.5f + (float)(rand() % 200) / 100.0f;
 }
@@ -23,7 +23,7 @@ void Enemy::MoveTowards(glm::vec3 target, float speed) {
 
     if (glm::distance(target, position) > 0.01f) {
         glm::vec3 direction = glm::normalize(target - position);
-        position += direction * speed * 0.016f;  // 0.016f ~60fps step
+        position += direction * speed;
         rotation = atan2(direction.x, direction.z);
     }
 }
