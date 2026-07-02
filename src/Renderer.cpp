@@ -802,14 +802,61 @@ static std::vector<Line2D> getCharStrokes(char c) {
     return lines;
 }
 
-static void drawLineList(GLuint shaderProgram, const std::vector<float>& vertices, glm::vec3 color) {
+static void drawLineList(GLuint shaderProgram, const std::vector<float>& vertices, glm::vec3 color, float thickness, float screenWidth, float screenHeight) {
     GLuint tempVAO, tempVBO;
     glGenVertexArrays(1, &tempVAO);
     glGenBuffers(1, &tempVBO);
     
+    std::vector<float> drawVertices;
+    
+    if (thickness <= 1.0f) {
+        drawVertices = vertices;
+    } else {
+        // Convert lines to thick quads (GL_TRIANGLES) to ensure proper thickness on all drivers
+        for (size_t i = 0; i < vertices.size(); i += 12) {
+            float x1 = vertices[i];   float y1 = vertices[i+1];
+            float x2 = vertices[i+6]; float y2 = vertices[i+7];
+            
+            // Convert NDC back to pixels for correct perpendicular direction
+            float px1 = (x1 + 1.0f) * 0.5f * screenWidth;
+            float py1 = (y1 + 1.0f) * 0.5f * screenHeight;
+            float px2 = (x2 + 1.0f) * 0.5f * screenWidth;
+            float py2 = (y2 + 1.0f) * 0.5f * screenHeight;
+            
+            float dx = px2 - px1;
+            float dy = py2 - py1;
+            float len = sqrt(dx*dx + dy*dy);
+            if (len < 0.0001f) continue;
+            
+            // Perpendicular vector
+            float nx = -dy / len;
+            float ny = dx / len;
+            
+            // Half thickness offset in NDC
+            float ndc_ox = (nx * thickness * 0.5f / screenWidth) * 2.0f;
+            float ndc_oy = (ny * thickness * 0.5f / screenHeight) * 2.0f;
+            
+            // Quad corners
+            float c1x = x1 + ndc_ox, c1y = y1 + ndc_oy;
+            float c2x = x1 - ndc_ox, c2y = y1 - ndc_oy;
+            float c3x = x2 + ndc_ox, c3y = y2 + ndc_oy;
+            float c4x = x2 - ndc_ox, c4y = y2 - ndc_oy;
+            
+            // Triangle 1 (c1, c2, c3)
+            drawVertices.insert(drawVertices.end(), {c1x, c1y, 0.0f, 0.0f, 0.0f, 1.0f});
+            drawVertices.insert(drawVertices.end(), {c2x, c2y, 0.0f, 0.0f, 0.0f, 1.0f});
+            drawVertices.insert(drawVertices.end(), {c3x, c3y, 0.0f, 0.0f, 0.0f, 1.0f});
+            
+            // Triangle 2 (c2, c4, c3)
+            drawVertices.insert(drawVertices.end(), {c2x, c2y, 0.0f, 0.0f, 0.0f, 1.0f});
+            drawVertices.insert(drawVertices.end(), {c4x, c4y, 0.0f, 0.0f, 0.0f, 1.0f});
+            drawVertices.insert(drawVertices.end(), {c3x, c3y, 0.0f, 0.0f, 0.0f, 1.0f});
+        }
+    }
+
     glBindVertexArray(tempVAO);
     glBindBuffer(GL_ARRAY_BUFFER, tempVBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, drawVertices.size() * sizeof(float), drawVertices.data(), GL_DYNAMIC_DRAW);
     
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
@@ -824,8 +871,12 @@ static void drawLineList(GLuint shaderProgram, const std::vector<float>& vertice
     glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), color.x, color.y, color.z);
     glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0); // 0 = no texture
     
-    glLineWidth(2.5f);
-    glDrawArrays(GL_LINES, 0, vertices.size() / 6);
+    if (thickness <= 1.0f) {
+        glLineWidth(thickness);
+        glDrawArrays(GL_LINES, 0, drawVertices.size() / 6);
+    } else {
+        glDrawArrays(GL_TRIANGLES, 0, drawVertices.size() / 6);
+    }
     
     glBindVertexArray(0);
     glDeleteBuffers(1, &tempVBO);
@@ -1380,27 +1431,27 @@ void Renderer::DrawGameOverScreen(bool isWin, int score, int stars, int wave) {
     float centerY = (float)screenHeight / 2.0f;
 
     if (isWin) {
-        DrawText2D("VICTORY!", centerX - 120.0f, centerY - 120.0f, 2.5f, glm::vec3(0.2f, 0.8f, 0.2f));
+        DrawText2D("VICTORY!", centerX - 120.0f, centerY - 120.0f, 2.5f, glm::vec3(0.2f, 0.8f, 0.2f), 6.0f);
     } else {
-        DrawText2D("GAME OVER", centerX - 140.0f, centerY - 120.0f, 2.5f, glm::vec3(0.86f, 0.30f, 0.26f));
+        DrawText2D("GAME OVER", centerX - 140.0f, centerY - 120.0f, 2.5f, glm::vec3(0.86f, 0.30f, 0.26f), 6.0f);
     }
     
     std::string waveText = "FINAL WAVE: " + std::to_string(wave);
-    DrawText2D(waveText, centerX - 110.0f, centerY - 40.0f, 1.2f);
+    DrawText2D(waveText, centerX - 110.0f, centerY - 40.0f, 1.2f, glm::vec3(1.0f), 4.0f);
     
     std::string scoreText = "FINAL SCORE: " + std::to_string(score);
-    DrawText2D(scoreText, centerX - 120.0f, centerY, 1.2f);
+    DrawText2D(scoreText, centerX - 120.0f, centerY, 1.2f, glm::vec3(1.0f), 4.0f);
     
     std::string starsText = "STARS: ";
     for (int i = 0; i < stars; i++) starsText += "* ";
     if (stars == 0) starsText += "NONE";
-    DrawText2D(starsText, centerX - 80.0f, centerY + 40.0f, 1.2f, glm::vec3(0.95f, 0.78f, 0.25f));
+    DrawText2D(starsText, centerX - 80.0f, centerY + 40.0f, 1.2f, glm::vec3(0.95f, 0.78f, 0.25f), 4.0f);
     
-    DrawText2D("PRESS SPACE TO RETURN TO MENU", centerX - 250.0f, centerY + 120.0f, 1.0f);
-    DrawText2D("PRESS R TO RESTART", centerX - 150.0f, centerY + 160.0f, 1.0f);
+    DrawText2D("PRESS SPACE TO RETURN TO MENU", centerX - 250.0f, centerY + 120.0f, 1.0f, glm::vec3(1.0f), 3.0f);
+    DrawText2D("PRESS R TO RESTART", centerX - 150.0f, centerY + 160.0f, 1.0f, glm::vec3(1.0f), 3.0f);
 }
 
-void Renderer::DrawText2D(const std::string& text, float x, float y, float scale, glm::vec3 color) {
+void Renderer::DrawText2D(const std::string& text, float x, float y, float scale, glm::vec3 color, float thickness) {
     glDisable(GL_DEPTH_TEST);
     
     std::vector<float> lineVertices;
@@ -1437,7 +1488,7 @@ void Renderer::DrawText2D(const std::string& text, float x, float y, float scale
     }
     
     if (!lineVertices.empty()) {
-        drawLineList(shaderProgram, lineVertices, color);
+        drawLineList(shaderProgram, lineVertices, color, thickness, (float)screenWidth, (float)screenHeight);
     }
     
     glEnable(GL_DEPTH_TEST);
@@ -1447,19 +1498,19 @@ void Renderer::DrawMenuScreen() {
     float cx = screenWidth / 2.0f;
     float cy = screenHeight / 2.0f;
     
-    DrawText2D("TANK DEFENDER 3D", cx - 180.0f, cy - 100.0f, 1.5f, glm::vec3(0.9f, 0.9f, 0.1f));
+    DrawText2D("TANK DEFENDER 3D", cx - 180.0f, cy - 100.0f, 1.5f, glm::vec3(0.9f, 0.9f, 0.1f), 5.0f);
     
     // Play Button
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 60.0f, cy + 90.0f, 120.0f, 40.0f, glm::vec3(0.2f, 0.6f, 0.2f), screenWidth, screenHeight);
-    DrawText2D("PLAY", cx - 35.0f, cy + 105.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f));
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 70.0f, cy + 90.0f, 140.0f, 40.0f, glm::vec3(0.2f, 0.6f, 0.2f), screenWidth, screenHeight);
+    DrawText2D("PLAY", cx - 35.0f, cy + 105.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f), 4.0f);
     
     // How To Play Button
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 120.0f, cy + 150.0f, 240.0f, 40.0f, glm::vec3(0.2f, 0.4f, 0.6f), screenWidth, screenHeight);
-    DrawText2D("HOW TO PLAY", cx - 100.0f, cy + 165.0f, 1.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 130.0f, cy + 150.0f, 260.0f, 40.0f, glm::vec3(0.2f, 0.4f, 0.6f), screenWidth, screenHeight);
+    DrawText2D("HOW TO PLAY", cx - 100.0f, cy + 165.0f, 1.0f, glm::vec3(1.0f, 1.0f, 1.0f), 4.0f);
     
     // Quit Button
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 60.0f, cy + 210.0f, 120.0f, 40.0f, glm::vec3(0.6f, 0.2f, 0.2f), screenWidth, screenHeight);
-    DrawText2D("QUIT", cx - 35.0f, cy + 225.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f));
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 70.0f, cy + 210.0f, 140.0f, 40.0f, glm::vec3(0.6f, 0.2f, 0.2f), screenWidth, screenHeight);
+    DrawText2D("QUIT", cx - 35.0f, cy + 225.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f), 4.0f);
 }
 
 void Renderer::DrawHowToPlayScreen() {
@@ -1467,18 +1518,22 @@ void Renderer::DrawHowToPlayScreen() {
     float cy = screenHeight / 2.0f;
     
     // Draw background
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.0f, 0.0f, 0.0f), screenWidth, screenHeight);
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, 0.0f, 0.0f, (float)screenWidth, (float)screenHeight, glm::vec3(0.05f, 0.05f, 0.08f), screenWidth, screenHeight);
 
-    DrawText2D("HOW TO PLAY", cx - 120.0f, cy - 100.0f, 1.2f, glm::vec3(0.9f, 0.9f, 0.1f));
+    DrawText2D("HOW TO PLAY", cx - 120.0f, cy - 100.0f, 1.2f, glm::vec3(0.9f, 0.9f, 0.1f), 4.5f);
     
-    DrawText2D("P1 (GREEN): WASD TO MOVE, F TO SHOOT", cx - 250.0f, cy - 30.0f, 0.8f, glm::vec3(0.3f, 0.8f, 0.3f));
-    DrawText2D("P2 (BLUE) : IJKL TO MOVE, ENTER/N TO SHOOT", cx - 250.0f, cy + 10.0f, 0.8f, glm::vec3(0.3f, 0.6f, 0.9f));
-    DrawText2D("DEFEND THE 3 TURRETS FROM ENEMIES!", cx - 230.0f, cy + 50.0f, 0.8f, glm::vec3(0.9f, 0.8f, 0.2f));
-    DrawText2D("IF ALL TURRETS ARE DESTROYED, YOU LOSE.", cx - 250.0f, cy + 80.0f, 0.8f, glm::vec3(0.8f, 0.3f, 0.3f));
+    float startY = cy - 40.0f;
+    DrawText2D("P1 (GREEN): W A S D TO MOVE", cx - 220.0f, startY, 0.8f, glm::vec3(0.4f, 0.9f, 0.4f), 3.5f);
+    DrawText2D("F TO SHOOT", cx - 220.0f, startY + 25.0f, 0.8f, glm::vec3(0.8f, 0.9f, 0.8f), 3.0f);
     
-    // Back Button
-    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 60.0f, cy + 150.0f, 120.0f, 40.0f, glm::vec3(0.4f, 0.4f, 0.4f), screenWidth, screenHeight);
-    DrawText2D("BACK", cx - 35.0f, cy + 165.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f));
+    DrawText2D("P2 (BLUE): I J K L TO MOVE", cx - 220.0f, startY + 70.0f, 0.8f, glm::vec3(0.4f, 0.4f, 0.9f), 3.5f);
+    DrawText2D("ENTER TO SHOOT", cx - 220.0f, startY + 95.0f, 0.8f, glm::vec3(0.8f, 0.8f, 0.9f), 3.0f);
+    
+    DrawText2D("DEFEND ALL TURRETS FROM ENEMIES!", cx - 260.0f, startY + 140.0f, 0.9f, glm::vec3(0.9f, 0.4f, 0.4f), 4.0f);
+    
+    // BACK Button
+    drawBar2D(shaderProgram, quadVAO, quadFaceCount, cx - 70.0f, cy + 150.0f, 140.0f, 40.0f, glm::vec3(0.4f, 0.4f, 0.4f), screenWidth, screenHeight);
+    DrawText2D("BACK", cx - 35.0f, cy + 165.0f, 1.2f, glm::vec3(1.0f, 1.0f, 1.0f), 4.0f);
 }
 
 void Renderer::Shutdown() {

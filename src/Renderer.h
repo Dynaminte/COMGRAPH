@@ -66,7 +66,7 @@ private:
     void DrawSphere(glm::mat4 model, glm::vec3 color, float radius = 1.0f);
     void DrawCylinder(glm::mat4 model, glm::vec3 color);
     void DrawQuad(glm::mat4 model, glm::vec3 color);
-    void DrawText2D(const std::string& text, float x, float y, float scale, glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f));
+    void DrawText2D(const std::string& text, float x, float y, float scale, glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f), float thickness = 2.5f);
 
     GLuint CompileShader(const char* source, GLenum shaderType);
     GLuint CreateShaderProgram(const char* vertexSrc, const char* fragmentSrc);
