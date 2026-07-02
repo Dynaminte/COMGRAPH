@@ -72,7 +72,7 @@ uniform vec3 lightPos;
 uniform vec3 viewPos;
 uniform sampler2D texture_diffuse;
 uniform sampler2D shadowMap;
-uniform bool useTexture;
+uniform int useTexture;   // 0=no texture, 1=ground (tiled), 2=object (no tiling)
 
 out vec4 FragColor;
 
@@ -97,11 +97,16 @@ float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
 void main()
 {
     vec3 color = objectColor;
-    if (useTexture) {
-        color = texture(texture_diffuse, TexCoords * 33.0).rgb;
+    if (useTexture == 1) {
+        // Ground texture - tiled
+        color = clamp(texture(texture_diffuse, TexCoords * 20.0).rgb, 0.0, 1.0);
+    } else if (useTexture == 2) {
+        // Object texture (tank/turret) - no tiling
+        vec4 texColor = texture(texture_diffuse, TexCoords);
+        color = clamp(texColor.rgb, 0.0, 1.0);
     }
     // Ambient
-    vec3 ambient = 0.5 * color;
+    vec3 ambient = 0.45 * color;
     // Diffuse
     vec3 norm = normalize(Normal);
     vec3 lightDir = normalize(lightPos - FragPos);
@@ -111,37 +116,45 @@ void main()
     vec3 viewDir = normalize(viewPos - FragPos);
     vec3 reflectDir = reflect(-lightDir, norm);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32.0);
-    vec3 specular = 0.8 * spec * vec3(1.0);
-    if (useTexture) {
-        specular = vec3(0.0); // No specular for sand/ground
+    vec3 specular = 0.0 * spec * vec3(1.0);
+    if (useTexture == 0) {
+        specular = 0.4 * spec * vec3(1.0); // Specular only for solid-color objects
     }
     
     float shadow = ShadowCalculation(FragPosLightSpace, norm, lightDir);
     
     vec3 result = ambient + (1.0 - shadow) * (diffuse + specular);
-    FragColor = vec4(result, 1.0);
+    FragColor = vec4(clamp(result, 0.0, 1.0), 1.0);
 }
 )";
 
 
 // Helper function to load texture
-static GLuint loadTexture(const char* path) {
+// forceChannels: 0=auto, 3=RGB, 4=RGBA
+static GLuint loadTexture(const char* path, int forceChannels = 0) {
     GLuint textureID = 0;
     int width, height, nrComponents;
     stbi_set_flip_vertically_on_load(true);
-    unsigned char *data = stbi_load(path, &width, &height, &nrComponents, 0);
+    unsigned char *data = stbi_load(path, &width, &height, &nrComponents, forceChannels);
+    if (forceChannels != 0) nrComponents = forceChannels;
     if (data) {
-        GLenum format = GL_RGB;
-        if (nrComponents == 1)
-            format = GL_RED;
-        else if (nrComponents == 3)
-            format = GL_RGB;
-        else if (nrComponents == 4)
-            format = GL_RGBA;
+        GLenum internalFormat = GL_RGB;
+        GLenum dataFormat = GL_RGB;
+        if (nrComponents == 1) {
+            internalFormat = GL_RED;
+            dataFormat = GL_RED;
+        } else if (nrComponents == 3) {
+            internalFormat = GL_RGB;
+            dataFormat = GL_RGB;
+        } else if (nrComponents == 4) {
+            internalFormat = GL_RGBA;
+            dataFormat = GL_RGBA;
+        }
 
         glGenTextures(1, &textureID);
         glBindTexture(GL_TEXTURE_2D, textureID);
-        glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+        // Use GL_RGB internal format even for RGBA source to avoid alpha issues
+        glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, dataFormat, GL_UNSIGNED_BYTE, data);
         glGenerateMipmap(GL_TEXTURE_2D);
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -150,9 +163,9 @@ static GLuint loadTexture(const char* path) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
         stbi_image_free(data);
-        std::cout << "Successfully loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
+        std::cout << "[TEXTURE OK] " << path << " (" << width << "x" << height << ", ch=" << nrComponents << ")" << std::endl;
     } else {
-        std::cerr << "Texture failed to load at path: " << path << std::endl;
+        std::cerr << "[TEXTURE FAIL] " << path << " - " << stbi_failure_reason() << std::endl;
     }
     return textureID;
 }
@@ -196,18 +209,46 @@ bool Renderer::Initialize() {
     glReadBuffer(GL_NONE);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // Load floor texture from asset folder
-    floorTexture = loadTexture("asset/sand2.jpeg");
+    // Load floor texture from asset folder - try multiple paths
+    const char* sandPaths[] = {
+        "asset/sand2.jpeg",
+        "../asset/sand2.jpeg",
+        "COMGRAPH/asset/sand2.jpeg"
+    };
+    for (const char* p : sandPaths) {
+        floorTexture = loadTexture(p, 3); // Force RGB for JPEG
+        if (floorTexture != 0) break;
+    }
     if (floorTexture == 0) {
-        floorTexture = loadTexture("../asset/sand2.jpeg");
+        std::cerr << "[WARNING] Sand texture not found - ground will use solid color" << std::endl;
     }
 
-    // Load tank and tower textures
-    tankTexture = loadTexture("asset/tank_camo.png");
-    if (tankTexture == 0) tankTexture = loadTexture("../asset/tank_camo.png");
+    // Load tank and tower textures - PNG files, try 3-channel (RGB) forced load
+    const char* tankPaths[] = {
+        "asset/tank_camo.png",
+        "../asset/tank_camo.png",
+        "COMGRAPH/asset/tank_camo.png"
+    };
+    for (const char* p : tankPaths) {
+        tankTexture = loadTexture(p, 3); // Force RGB to avoid alpha channel issues
+        if (tankTexture != 0) break;
+    }
+    if (tankTexture == 0) {
+        std::cerr << "[WARNING] Tank texture not found - tank will use solid color" << std::endl;
+    }
 
-    turretTexture = loadTexture("asset/tower_metal.png");
-    if (turretTexture == 0) turretTexture = loadTexture("../asset/tower_metal.png");
+    const char* turretPaths[] = {
+        "asset/tower_metal.png",
+        "../asset/tower_metal.png",
+        "COMGRAPH/asset/tower_metal.png"
+    };
+    for (const char* p : turretPaths) {
+        turretTexture = loadTexture(p, 3); // Force RGB
+        if (turretTexture != 0) break;
+    }
+    if (turretTexture == 0) {
+        std::cerr << "[WARNING] Turret texture not found - turret will use solid color" << std::endl;
+    }
 
     // Setup 3D shapes
     SetupShapes();
@@ -860,10 +901,15 @@ void Renderer::DrawGround(glm::mat4 projection, glm::mat4 view) {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, floorTexture);
             glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
-            glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
+            glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1); // 1 = ground tiled
         } else {
+            // Fallback: sandy color for ground
             glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 0);
+            glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 0.76f, 0.60f, 0.38f);
         }
+    } else {
+        // Shadow pass - no texture needed
+        glUniform1i(glGetUniformLocation(shadowShaderProgram, "useTexture"), 0);
     }
 
     glBindVertexArray(quadVAO);
@@ -880,50 +926,58 @@ void Renderer::DrawPlayer(const Player& player, glm::mat4 projection, glm::mat4 
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
     model = glm::rotate(model, rot.y, glm::vec3(0.0f, 1.0f, 0.0f));
 
+    // Warna berdasarkan player
+    glm::vec3 bodyColor  = player.IsPlayer1() ? glm::vec3(0.18f, 0.72f, 0.22f) : glm::vec3(0.18f, 0.35f, 0.80f);
+    glm::vec3 domeColor  = player.IsPlayer1() ? glm::vec3(0.12f, 0.55f, 0.15f) : glm::vec3(0.12f, 0.25f, 0.65f);
+    glm::vec3 barrelColor= glm::vec3(0.18f, 0.18f, 0.20f); // Dark metal
+
     // --- Body (Textured Cube) ---
     glm::mat4 bodyModel = glm::scale(model, glm::vec3(1.5f, 0.6f, 2.0f));
-    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(bodyModel));
-    if (!isShadowPass && tankTexture != 0) {
-        DrawCubeTextured(bodyModel, tankTexture);
-    } else if (!isShadowPass) {
-        glm::vec3 color = player.IsPlayer1() ? glm::vec3(0.2f, 0.8f, 0.2f) : glm::vec3(0.2f, 0.2f, 0.8f);
-        DrawCube(bodyModel, color);
-    } else {
+    if (isShadowPass) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(bodyModel));
         glBindVertexArray(cubeVAO); glDrawArrays(GL_TRIANGLES, 0, cubeFaceCount); glBindVertexArray(0);
+    } else if (tankTexture != 0) {
+        DrawCubeTextured(bodyModel, tankTexture);
+    } else {
+        DrawCube(bodyModel, bodyColor);
     }
 
     // --- Turret Dome (Textured Cylinder) ---
-    glm::mat4 turretModel = glm::translate(model, glm::vec3(0.0f, 0.5f, 0.0f));
-    turretModel = glm::scale(turretModel, glm::vec3(0.8f, 0.5f, 0.8f));
-    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(turretModel));
-    if (!isShadowPass && tankTexture != 0) {
-        DrawCylinderTextured(turretModel, tankTexture);
-    } else if (!isShadowPass) {
-        glm::vec3 color = player.IsPlayer1() ? glm::vec3(0.15f, 0.65f, 0.15f) : glm::vec3(0.15f, 0.15f, 0.65f);
-        DrawCylinder(turretModel, color);
-    } else {
+    glm::mat4 turretDomeModel = glm::translate(model, glm::vec3(0.0f, 0.5f, 0.0f));
+    turretDomeModel = glm::scale(turretDomeModel, glm::vec3(0.8f, 0.5f, 0.8f));
+    if (isShadowPass) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(turretDomeModel));
         glBindVertexArray(cylinderVAO); glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount); glBindVertexArray(0);
+    } else if (tankTexture != 0) {
+        DrawCylinderTextured(turretDomeModel, tankTexture);
+    } else {
+        DrawCylinder(turretDomeModel, domeColor);
     }
 
-    // --- Barrel (Grey metal) ---
+    // --- Barrel (Dark metal cylinder - textured with turret metal texture or dark color) ---
     glm::mat4 barrelModel = glm::translate(model, glm::vec3(0.0f, 0.5f, -0.8f));
     barrelModel = glm::rotate(barrelModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
     barrelModel = glm::scale(barrelModel, glm::vec3(0.2f, 1.2f, 0.2f));
-    glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(barrelModel));
-    if (!isShadowPass) { DrawCylinder(barrelModel, glm::vec3(0.25f, 0.25f, 0.25f)); }
-    else { glBindVertexArray(cylinderVAO); glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount); glBindVertexArray(0); }
+    if (isShadowPass) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(barrelModel));
+        glBindVertexArray(cylinderVAO); glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount); glBindVertexArray(0);
+    } else if (turretTexture != 0) {
+        // Barrel pakai turretTexture (metal plate) agar terlihat logam
+        DrawCylinderTextured(barrelModel, turretTexture);
+    } else {
+        DrawCylinder(barrelModel, barrelColor);
+    }
 
     // --- World-space HP bar above tank (only in main pass) ---
     if (!isShadowPass && player.GetHealth() > 0) {
         glUseProgram(shaderProgram);
         float hpPct = player.GetHealth() / 100.0f;
-        
+
         // Background (dark)
         glm::mat4 hpBg = glm::translate(glm::mat4(1.0f), pos + glm::vec3(0.0f, 1.5f, 0.0f));
         hpBg = glm::scale(hpBg, glm::vec3(2.0f, 0.15f, 0.15f));
         DrawCube(hpBg, glm::vec3(0.1f, 0.1f, 0.1f));
 
-        // Foreground (color by health)
         glm::vec3 hpColor = hpPct > 0.6f ? glm::vec3(0.2f, 0.85f, 0.2f) :
                             hpPct > 0.3f ? glm::vec3(0.9f, 0.75f, 0.1f) :
                                            glm::vec3(0.9f, 0.15f, 0.15f);
@@ -936,74 +990,78 @@ void Renderer::DrawPlayer(const Player& player, glm::mat4 projection, glm::mat4 
 
 
 void Renderer::DrawEnemy(const Enemy& enemy, glm::mat4 projection, glm::mat4 view) {
-    glUseProgram(shaderProgram);
-
-    glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
-    glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
+    // Gunakan shadow atau main shader sesuai pass
+    GLuint currentProg = isShadowPass ? shadowShaderProgram : shaderProgram;
+    glUseProgram(currentProg);
 
     glm::vec3 pos = enemy.GetPosition();
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
     model = glm::rotate(model, enemy.GetRotation(), glm::vec3(0.0f, 1.0f, 0.0f));
 
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    if (!isShadowPass) {
+        glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
+        glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
+        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    }
 
-    // Colors
-    glm::vec3 planeColor(0.85f, 0.15f, 0.15f); // Merah untuk bodi pesawat
-    glm::vec3 wingColor(0.9f, 0.9f, 0.9f);     // Putih untuk sayap
-    glm::vec3 propellerColor(0.9f, 0.7f, 0.1f); // Kuning untuk moncong
+    // Colors (hanya main pass)
+    glm::vec3 planeColor(0.85f, 0.15f, 0.15f);
+    glm::vec3 wingColor(0.88f, 0.88f, 0.88f);
+    glm::vec3 propColor(0.9f, 0.7f, 0.1f);
 
-    // 1. Fuselage (Badan Pesawat) - Rotated 90 degrees around X to lie flat horizontally
-    glm::mat4 fuselageModel = glm::rotate(model, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    fuselageModel = glm::scale(fuselageModel, glm::vec3(0.35f, 1.6f, 0.35f));
-    DrawCylinder(fuselageModel, planeColor);
+    auto shadowCylinder = [&](glm::mat4 m) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(m));
+        glBindVertexArray(cylinderVAO); glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount); glBindVertexArray(0);
+    };
+    auto shadowCube = [&](glm::mat4 m) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(m));
+        glBindVertexArray(cubeVAO); glDrawArrays(GL_TRIANGLES, 0, cubeFaceCount); glBindVertexArray(0);
+    };
 
-    // 2. Main Wings (Sayap Utama)
-    glm::mat4 wingsModel = glm::translate(model, glm::vec3(0.0f, 0.0f, -0.2f));
-    wingsModel = glm::scale(wingsModel, glm::vec3(2.6f, 0.06f, 0.5f));
-    DrawCube(wingsModel, wingColor);
+    // 1. Fuselage
+    glm::mat4 fuselage = glm::rotate(model, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    fuselage = glm::scale(fuselage, glm::vec3(0.35f, 1.6f, 0.35f));
+    isShadowPass ? shadowCylinder(fuselage) : DrawCylinder(fuselage, planeColor);
 
-    // 3. Tail Wings (Sayap Ekor Horizontal)
-    glm::mat4 tailWingsModel = glm::translate(model, glm::vec3(0.0f, 0.0f, 0.7f));
-    tailWingsModel = glm::scale(tailWingsModel, glm::vec3(1.0f, 0.05f, 0.25f));
-    DrawCube(tailWingsModel, wingColor);
+    // 2. Main Wings
+    glm::mat4 wings = glm::translate(model, glm::vec3(0.0f, 0.0f, -0.2f));
+    wings = glm::scale(wings, glm::vec3(2.6f, 0.06f, 0.5f));
+    isShadowPass ? shadowCube(wings) : DrawCube(wings, wingColor);
 
-    // 4. Vertical Stabilizer (Sayap Ekor Vertikal)
-    glm::mat4 tailFinModel = glm::translate(model, glm::vec3(0.0f, 0.25f, 0.7f));
-    tailFinModel = glm::scale(tailFinModel, glm::vec3(0.05f, 0.4f, 0.2f));
-    DrawCube(tailFinModel, planeColor);
+    // 3. Tail Wings
+    glm::mat4 tailWings = glm::translate(model, glm::vec3(0.0f, 0.0f, 0.7f));
+    tailWings = glm::scale(tailWings, glm::vec3(1.0f, 0.05f, 0.25f));
+    isShadowPass ? shadowCube(tailWings) : DrawCube(tailWings, wingColor);
 
-    // 5. Spinner & Propeller (Moncong Pesawat yang berputar)
-    glm::mat4 spinnerModel = glm::translate(model, glm::vec3(0.0f, 0.0f, -0.82f));
-    spinnerModel = glm::rotate(spinnerModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    spinnerModel = glm::scale(spinnerModel, glm::vec3(0.2f, 0.15f, 0.2f));
-    DrawCylinder(spinnerModel, propellerColor);
+    // 4. Vertical Stabilizer
+    glm::mat4 tailFin = glm::translate(model, glm::vec3(0.0f, 0.25f, 0.7f));
+    tailFin = glm::scale(tailFin, glm::vec3(0.05f, 0.4f, 0.2f));
+    isShadowPass ? shadowCube(tailFin) : DrawCube(tailFin, planeColor);
 
-    // Propeller blades (spinning animation using time)
-    float propAngle = (float)glfwGetTime() * 25.0f;
-    glm::mat4 propModel = glm::translate(model, glm::vec3(0.0f, 0.0f, -0.85f));
-    propModel = glm::rotate(propModel, propAngle, glm::vec3(0.0f, 0.0f, 1.0f));
+    // 5. Spinner (moncong)
+    glm::mat4 spinner = glm::translate(model, glm::vec3(0.0f, 0.0f, -0.82f));
+    spinner = glm::rotate(spinner, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    spinner = glm::scale(spinner, glm::vec3(0.2f, 0.15f, 0.2f));
+    isShadowPass ? shadowCylinder(spinner) : DrawCylinder(spinner, propColor);
 
-    // Blade 1
-    glm::mat4 blade1Model = glm::scale(propModel, glm::vec3(0.06f, 0.8f, 0.02f));
-    DrawCube(blade1Model, glm::vec3(0.2f, 0.2f, 0.2f));
+    // 6. Propeller blades (hanya main pass agar shadow tidak aneh berputar)
+    if (!isShadowPass) {
+        float propAngle = (float)glfwGetTime() * 25.0f;
+        glm::mat4 propRoot = glm::translate(model, glm::vec3(0.0f, 0.0f, -0.85f));
+        propRoot = glm::rotate(propRoot, propAngle, glm::vec3(0.0f, 0.0f, 1.0f));
+        DrawCube(glm::scale(propRoot, glm::vec3(0.06f, 0.8f, 0.02f)), glm::vec3(0.2f, 0.2f, 0.2f));
+        DrawCube(glm::scale(propRoot, glm::vec3(0.8f, 0.06f, 0.02f)), glm::vec3(0.2f, 0.2f, 0.2f));
+    }
 
-    // Blade 2
-    glm::mat4 blade2Model = glm::scale(propModel, glm::vec3(0.8f, 0.06f, 0.02f));
-    DrawCube(blade2Model, glm::vec3(0.2f, 0.2f, 0.2f));
-
-    // 6. Draw Health Bar diatas pesawat
-    if (enemy.GetHealth() > 0) {
-        float hpPercent = (float)enemy.GetHealth() / 3.0f; // max HP = 3
-        
-        // Background bar (hitam)
+    // 7. Health Bar (main pass only)
+    if (!isShadowPass && enemy.GetHealth() > 0) {
+        float hpPct = (float)enemy.GetHealth() / 3.0f;
         glm::mat4 hpBg = glm::translate(model, glm::vec3(0.0f, 0.9f, 0.0f));
         hpBg = glm::scale(hpBg, glm::vec3(1.0f, 0.08f, 0.08f));
         DrawCube(hpBg, glm::vec3(0.1f, 0.1f, 0.1f));
-
-        // Foreground bar (hijau)
-        glm::mat4 hpFg = glm::translate(model, glm::vec3(-0.5f * (1.0f - hpPercent), 0.9f, 0.01f));
-        hpFg = glm::scale(hpFg, glm::vec3(1.0f * hpPercent, 0.08f, 0.08f));
+        glm::mat4 hpFg = glm::translate(model, glm::vec3(-0.5f * (1.0f - hpPct), 0.9f, 0.01f));
+        hpFg = glm::scale(hpFg, glm::vec3(1.0f * hpPct, 0.08f, 0.08f));
         DrawCube(hpFg, glm::vec3(0.2f, 0.8f, 0.2f));
     }
 }
@@ -1035,117 +1093,124 @@ void Renderer::DrawBullet(const Bullet& bullet, glm::mat4 projection, glm::mat4 
 }
 
 void Renderer::DrawTurret(const Turret& turret, glm::mat4 projection, glm::mat4 view) {
-    glUseProgram(shaderProgram);
-
-    glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
-    glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
+    // Gunakan shadow atau main shader sesuai pass
+    GLuint currentProg = isShadowPass ? shadowShaderProgram : shaderProgram;
+    glUseProgram(currentProg);
 
     glm::vec3 pos = turret.GetPosition();
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
 
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-
-    glm::vec3 color = turret.IsAlive() ? glm::vec3(0.85f, 0.75f, 0.2f) 
-                                       : glm::vec3(0.3f, 0.3f, 0.3f);
-    glm::vec3 metalColor(0.25f, 0.25f, 0.25f);
-
-    // 1. Sci-fi Base Border Ring (flat on ground at y = -0.24f) - scaled larger
-    glm::mat4 ringModel = glm::translate(glm::mat4(1.0f), glm::vec3(pos.x, -0.24f, pos.z));
-    ringModel = glm::rotate(ringModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    ringModel = glm::scale(ringModel, glm::vec3(3.2f, 3.2f, 1.0f));
-    if (turret.IsAlive()) {
-        DrawQuad(ringModel, glm::vec3(0.9f, 0.8f, 0.1f)); // Bright yellow-gold for active
-    } else {
-        DrawQuad(ringModel, glm::vec3(0.4f, 0.15f, 0.15f)); // Dark red for destroyed
+    if (!isShadowPass) {
+        // Hanya set uniform ini di main pass
+        glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 10.0f, 20.0f, 15.0f);
+        glUniform3f(glGetUniformLocation(shaderProgram, "viewPos"), 0.0f, 15.0f, 20.0f);
+        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
     }
 
-    // 2. Base plate (Cube) - textured or colored
+    // Warna turret: aktif=gold, hancur=abu
+    glm::vec3 goldColor(0.80f, 0.68f, 0.18f);
+    glm::vec3 deadColor(0.28f, 0.28f, 0.28f);
+    glm::vec3 metalDark(0.20f, 0.20f, 0.22f);  // Warna tiang/barrel
+    glm::vec3 metalMid(0.38f, 0.38f, 0.40f);   // Warna shield armor
+
+    // Helper lambdas untuk shadow pass
+    auto sCube = [&](glm::mat4 m) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(m));
+        glBindVertexArray(cubeVAO); glDrawArrays(GL_TRIANGLES, 0, cubeFaceCount); glBindVertexArray(0);
+    };
+    auto sCyl = [&](glm::mat4 m) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(m));
+        glBindVertexArray(cylinderVAO); glDrawArrays(GL_TRIANGLES, 0, cylinderFaceCount); glBindVertexArray(0);
+    };
+    auto sQuad = [&](glm::mat4 m) {
+        glUniformMatrix4fv(glGetUniformLocation(currentProg, "model"), 1, GL_FALSE, glm::value_ptr(m));
+        glBindVertexArray(quadVAO); glDrawArrays(GL_TRIANGLES, 0, quadFaceCount); glBindVertexArray(0);
+    };
+
+    // 1. Base ring (dekoratif, hanya main pass karena shadow-nya tidak penting)
+    if (!isShadowPass) {
+        glm::mat4 ringModel = glm::translate(glm::mat4(1.0f), glm::vec3(pos.x, -0.24f, pos.z));
+        ringModel = glm::rotate(ringModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        ringModel = glm::scale(ringModel, glm::vec3(3.2f, 3.2f, 1.0f));
+        DrawQuad(ringModel, turret.IsAlive() ? glm::vec3(0.9f, 0.8f, 0.1f) : glm::vec3(0.4f, 0.15f, 0.15f));
+    }
+
+    // 2. Base plate - texture metal untuk turret aktif
     glm::mat4 baseModel = glm::scale(model, glm::vec3(2.5f, 0.6f, 2.5f));
-    if (turretTexture != 0 && turret.IsAlive()) DrawCubeTextured(baseModel, turretTexture);
-    else DrawCube(baseModel, color);
+    if (isShadowPass) { sCube(baseModel); }
+    else if (turretTexture != 0 && turret.IsAlive()) { DrawCubeTextured(baseModel, turretTexture); }
+    else { DrawCube(baseModel, turret.IsAlive() ? goldColor : deadColor); }
 
-    // 3. Four Corner Pillars/Pads for structural reinforcement (Cubes)
+    // 3. Four Corner Pillars - warna gelap (metalDark), bukan tekstur
     if (turret.IsAlive()) {
-        float offset = 1.05f;
-        glm::mat4 p1 = glm::translate(model, glm::vec3(-offset, 0.4f, -offset));
-        DrawCube(glm::scale(p1, glm::vec3(0.4f, 0.8f, 0.4f)), metalColor);
-
-        glm::mat4 p2 = glm::translate(model, glm::vec3(offset, 0.4f, -offset));
-        DrawCube(glm::scale(p2, glm::vec3(0.4f, 0.8f, 0.4f)), metalColor);
-
-        glm::mat4 p3 = glm::translate(model, glm::vec3(-offset, 0.4f, offset));
-        DrawCube(glm::scale(p3, glm::vec3(0.4f, 0.8f, 0.4f)), metalColor);
-
-        glm::mat4 p4 = glm::translate(model, glm::vec3(offset, 0.4f, offset));
-        DrawCube(glm::scale(p4, glm::vec3(0.4f, 0.8f, 0.4f)), metalColor);
+        float off = 1.05f;
+        glm::vec3 pillarOff[4] = {{-off,0.4f,-off},{off,0.4f,-off},{-off,0.4f,off},{off,0.4f,off}};
+        for (auto& o : pillarOff) {
+            glm::mat4 pm = glm::scale(glm::translate(model, o), glm::vec3(0.4f, 0.8f, 0.4f));
+            isShadowPass ? sCube(pm) : DrawCube(pm, metalDark);
+        }
     }
 
-    // 4. Sub-base plate (Cube) - scaled larger
-    glm::mat4 subBaseModel = glm::translate(model, glm::vec3(0.0f, 0.35f, 0.0f));
-    subBaseModel = glm::scale(subBaseModel, glm::vec3(1.8f, 0.3f, 1.8f));
-    if (turretTexture != 0 && turret.IsAlive()) DrawCubeTextured(subBaseModel, turretTexture);
-    else DrawCube(subBaseModel, color * 0.8f);
+    // 4. Sub-base plate - tekstur juga
+    glm::mat4 subBase = glm::scale(glm::translate(model, glm::vec3(0.0f, 0.35f, 0.0f)), glm::vec3(1.8f, 0.3f, 1.8f));
+    if (isShadowPass) { sCube(subBase); }
+    else if (turretTexture != 0 && turret.IsAlive()) { DrawCubeTextured(subBase, turretTexture); }
+    else { DrawCube(subBase, turret.IsAlive() ? goldColor * 0.85f : deadColor * 0.85f); }
 
-    // 5. Dome body (Cylinder) - scaled larger
-    glm::mat4 bodyModel = glm::translate(model, glm::vec3(0.0f, 0.8f, 0.0f));
-    bodyModel = glm::scale(bodyModel, glm::vec3(1.4f, 0.8f, 1.4f));
-    if (turretTexture != 0 && turret.IsAlive()) DrawCylinderTextured(bodyModel, turretTexture);
-    else DrawCylinder(bodyModel, color * 0.95f);
+    // 5. Dome body (Cylinder) - tekstur utama turret
+    glm::mat4 domeModel = glm::scale(glm::translate(model, glm::vec3(0.0f, 0.8f, 0.0f)), glm::vec3(1.4f, 0.8f, 1.4f));
+    if (isShadowPass) { sCyl(domeModel); }
+    else if (turretTexture != 0 && turret.IsAlive()) { DrawCylinderTextured(domeModel, turretTexture); }
+    else { DrawCylinder(domeModel, turret.IsAlive() ? goldColor * 0.95f : deadColor); }
 
-    // 6. Dome Side shields/armor plates (Cubes)
+    // 6. Side Shield Armor - warna metalMid untuk kontras
     if (turret.IsAlive()) {
-        glm::mat4 leftShield = glm::translate(model, glm::vec3(-0.85f, 0.9f, 0.0f));
-        leftShield = glm::scale(leftShield, glm::vec3(0.2f, 0.8f, 1.3f));
-        DrawCube(leftShield, color * 0.7f);
-
-        glm::mat4 rightShield = glm::translate(model, glm::vec3(0.85f, 0.9f, 0.0f));
-        rightShield = glm::scale(rightShield, glm::vec3(0.2f, 0.8f, 1.3f));
-        DrawCube(rightShield, color * 0.7f);
+        glm::mat4 lShield = glm::scale(glm::translate(model, glm::vec3(-0.85f, 0.9f, 0.0f)), glm::vec3(0.2f, 0.8f, 1.3f));
+        glm::mat4 rShield = glm::scale(glm::translate(model, glm::vec3( 0.85f, 0.9f, 0.0f)), glm::vec3(0.2f, 0.8f, 1.3f));
+        if (isShadowPass) { sCube(lShield); sCube(rShield); }
+        else {
+            // Shield pakai turretTexture tapi lebih gelap (tinted)
+            if (turretTexture != 0) {
+                DrawCubeTextured(lShield, turretTexture);
+                DrawCubeTextured(rShield, turretTexture);
+            } else {
+                DrawCube(lShield, metalMid);
+                DrawCube(rShield, metalMid);
+            }
+        }
     }
 
-    // 7. Spinning radar array on top
-    if (turret.IsAlive()) {
-        // Radar Stand
-        glm::mat4 radarStand = glm::translate(model, glm::vec3(0.0f, 1.35f, 0.4f));
-        radarStand = glm::scale(radarStand, glm::vec3(0.12f, 0.4f, 0.12f));
-        DrawCylinder(radarStand, metalColor);
+    // 7. Radar stand + dish (hanya main pass — shadow terlalu kecil untuk signifikan)
+    if (turret.IsAlive() && !isShadowPass) {
+        glm::mat4 radarStand = glm::scale(glm::translate(model, glm::vec3(0.0f, 1.35f, 0.4f)), glm::vec3(0.12f, 0.4f, 0.12f));
+        DrawCylinder(radarStand, metalDark);
 
-        // Radar Dish (spins around Y-axis)
         float radarAngle = (float)glfwGetTime() * 4.0f;
-        glm::mat4 radarDish = glm::translate(model, glm::vec3(0.0f, 1.6f, 0.4f));
-        radarDish = glm::rotate(radarDish, radarAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::mat4 radarDish = glm::rotate(glm::translate(model, glm::vec3(0.0f, 1.6f, 0.4f)), radarAngle, glm::vec3(0.0f, 1.0f, 0.0f));
         radarDish = glm::scale(radarDish, glm::vec3(0.9f, 0.15f, 0.3f));
-        DrawCube(radarDish, glm::vec3(0.7f, 0.7f, 0.7f));
+        DrawCube(radarDish, glm::vec3(0.65f, 0.65f, 0.68f));
     }
 
-    // 8. Heavy Dual Anti-Aircraft Gun Barrels
+    // 8. Gun Barrels - teksturkan dengan turretTexture agar terlihat logam
     if (turret.IsAlive()) {
-        // Left Heavy Barrel
-        glm::mat4 barrel1 = glm::translate(model, glm::vec3(-0.4f, 0.9f, -0.6f));
-        barrel1 = glm::rotate(barrel1, glm::radians(55.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        barrel1 = glm::scale(barrel1, glm::vec3(0.16f, 2.0f, 0.16f));
-        DrawCylinder(barrel1, metalColor);
-
-        // Right Heavy Barrel
-        glm::mat4 barrel2 = glm::translate(model, glm::vec3(0.4f, 0.9f, -0.6f));
-        barrel2 = glm::rotate(barrel2, glm::radians(55.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        barrel2 = glm::scale(barrel2, glm::vec3(0.16f, 2.0f, 0.16f));
-        DrawCylinder(barrel2, metalColor);
+        glm::vec3 barrelOffsets[2] = {{-0.4f, 0.9f, -0.6f}, {0.4f, 0.9f, -0.6f}};
+        for (auto& bo : barrelOffsets) {
+            glm::mat4 bm = glm::translate(model, bo);
+            bm = glm::rotate(bm, glm::radians(55.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            bm = glm::scale(bm, glm::vec3(0.16f, 2.0f, 0.16f));
+            if (isShadowPass) { sCyl(bm); }
+            else if (turretTexture != 0) { DrawCylinderTextured(bm, turretTexture); }
+            else { DrawCylinder(bm, metalDark); }
+        }
     }
 
-    // 9. Floating health bar above the massive turret (raised Y coordinate to 2.5f)
-    if (turret.IsAlive() && turret.GetHealth() > 0) {
-        float hpPercent = (float)turret.GetHealth() / 100.0f;
-        
-        // Background bar (black)
-        glm::mat4 hpBg = glm::translate(model, glm::vec3(0.0f, 2.5f, 0.0f));
-        hpBg = glm::scale(hpBg, glm::vec3(1.8f, 0.12f, 0.12f));
+    // 9. HP bar (main pass only)
+    if (!isShadowPass && turret.IsAlive() && turret.GetHealth() > 0) {
+        float hpPct = (float)turret.GetHealth() / 100.0f;
+        glm::mat4 hpBg = glm::scale(glm::translate(model, glm::vec3(0.0f, 2.5f, 0.0f)), glm::vec3(1.8f, 0.12f, 0.12f));
         DrawCube(hpBg, glm::vec3(0.1f, 0.1f, 0.1f));
-
-        // Foreground bar (yellow/gold)
-        glm::mat4 hpFg = glm::translate(model, glm::vec3(-0.9f * (1.0f - hpPercent), 2.5f, 0.01f));
-        hpFg = glm::scale(hpFg, glm::vec3(1.8f * hpPercent, 0.12f, 0.12f));
+        glm::mat4 hpFg = glm::scale(glm::translate(model, glm::vec3(-0.9f*(1.0f-hpPct), 2.5f, 0.01f)), glm::vec3(1.8f*hpPct, 0.12f, 0.12f));
         DrawCube(hpFg, glm::vec3(0.85f, 0.75f, 0.2f));
     }
 }
@@ -1161,7 +1226,7 @@ void Renderer::DrawCube(glm::mat4 model, glm::vec3 color) {
 
 void Renderer::DrawCubeTextured(glm::mat4 model, GLuint texture) {
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 2); // 2 = object texture (no tiling)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
     glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
@@ -1173,7 +1238,7 @@ void Renderer::DrawCubeTextured(glm::mat4 model, GLuint texture) {
 
 void Renderer::DrawCylinderTextured(glm::mat4 model, GLuint texture) {
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 1);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useTexture"), 2); // 2 = object texture (no tiling)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
     glUniform1i(glGetUniformLocation(shaderProgram, "texture_diffuse"), 0);
@@ -1423,19 +1488,16 @@ void Renderer::DrawHowToPlayScreen() {
 }
 
 void Renderer::Shutdown() {
-    if (floorTexture != 0) {
-        glDeleteTextures(1, &floorTexture);
-        floorTexture = 0;
-    }
-    if (shaderProgram != 0) {
-        glDeleteProgram(shaderProgram);
-    }
-    if (shadowShaderProgram != 0) {
-        glDeleteProgram(shadowShaderProgram);
-    }
+    if (floorTexture != 0)  { glDeleteTextures(1, &floorTexture);  floorTexture  = 0; }
+    if (tankTexture != 0)   { glDeleteTextures(1, &tankTexture);   tankTexture   = 0; }
+    if (turretTexture != 0) { glDeleteTextures(1, &turretTexture); turretTexture = 0; }
+    if (depthMap != 0)      { glDeleteTextures(1, &depthMap);      depthMap      = 0; }
+    if (depthMapFBO != 0)   { glDeleteFramebuffers(1, &depthMapFBO); depthMapFBO = 0; }
+    if (shaderProgram != 0)       { glDeleteProgram(shaderProgram);       shaderProgram       = 0; }
+    if (shadowShaderProgram != 0) { glDeleteProgram(shadowShaderProgram); shadowShaderProgram = 0; }
     // Delete VAOs
-    if (cubeVAO != 0) glDeleteVertexArrays(1, &cubeVAO);
-    if (sphereVAO != 0) glDeleteVertexArrays(1, &sphereVAO);
+    if (cubeVAO != 0)     glDeleteVertexArrays(1, &cubeVAO);
+    if (sphereVAO != 0)   glDeleteVertexArrays(1, &sphereVAO);
     if (cylinderVAO != 0) glDeleteVertexArrays(1, &cylinderVAO);
-    if (quadVAO != 0) glDeleteVertexArrays(1, &quadVAO);
+    if (quadVAO != 0)     glDeleteVertexArrays(1, &quadVAO);
 }

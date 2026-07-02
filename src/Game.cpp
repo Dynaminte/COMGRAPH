@@ -68,25 +68,30 @@ void Game::ProcessInput(GLFWwindow* window) {
         if (mouseDown && !mousePressed) {
             double xpos, ypos;
             glfwGetCursorPos(window, &xpos, &ypos);
+            // Gunakan window size (bukan framebuffer) untuk mapping cursor ke virtual coords
             int winW, winH;
             glfwGetWindowSize(window, &winW, &winH);
-            float virtualX = (float)xpos / winW * screenWidth;
-            float virtualY = (float)ypos / winH * screenHeight;
-            
+            if (winW <= 0 || winH <= 0) { mousePressed = mouseDown; return; }
+            float virtualX = (float)(xpos / winW) * screenWidth;
+            float virtualY = (float)(ypos / winH) * screenHeight;
+
             float cx = screenWidth / 2.0f;
             float cy = screenHeight / 2.0f;
-            
-            // PLAY Button
-            if (virtualX >= cx - 60.0f && virtualX <= cx + 60.0f && virtualY >= cy + 90.0f && virtualY <= cy + 130.0f) {
+
+            // PLAY Button (diperbesar hit area +10px tiap sisi)
+            if (virtualX >= cx - 70.0f && virtualX <= cx + 70.0f &&
+                virtualY >= cy + 85.0f  && virtualY <= cy + 135.0f) {
                 gameState = PLAYING;
                 ResetGame();
             }
-            // HOW TO PLAY Button
-            else if (virtualX >= cx - 120.0f && virtualX <= cx + 120.0f && virtualY >= cy + 150.0f && virtualY <= cy + 190.0f) {
+            // HOW TO PLAY Button (diperbesar)
+            else if (virtualX >= cx - 130.0f && virtualX <= cx + 130.0f &&
+                     virtualY >= cy + 145.0f   && virtualY <= cy + 195.0f) {
                 gameState = HOW_TO_PLAY;
             }
-            // QUIT Button
-            else if (virtualX >= cx - 60.0f && virtualX <= cx + 60.0f && virtualY >= cy + 210.0f && virtualY <= cy + 250.0f) {
+            // QUIT Button (diperbesar)
+            else if (virtualX >= cx - 70.0f && virtualX <= cx + 70.0f &&
+                     virtualY >= cy + 205.0f  && virtualY <= cy + 255.0f) {
                 glfwSetWindowShouldClose(window, true);
             }
         }
@@ -96,19 +101,21 @@ void Game::ProcessInput(GLFWwindow* window) {
             glfwGetCursorPos(window, &xpos, &ypos);
             int winW, winH;
             glfwGetWindowSize(window, &winW, &winH);
-            float virtualX = (float)xpos / winW * screenWidth;
-            float virtualY = (float)ypos / winH * screenHeight;
-            
+            if (winW <= 0 || winH <= 0) { mousePressed = mouseDown; return; }
+            float virtualX = (float)(xpos / winW) * screenWidth;
+            float virtualY = (float)(ypos / winH) * screenHeight;
+
             float cx = screenWidth / 2.0f;
             float cy = screenHeight / 2.0f;
-            
-            // BACK Button
-            if (virtualX >= cx - 60.0f && virtualX <= cx + 60.0f && virtualY >= cy + 150.0f && virtualY <= cy + 190.0f) {
+
+            // BACK Button (diperbesar)
+            if (virtualX >= cx - 70.0f && virtualX <= cx + 70.0f &&
+                virtualY >= cy + 145.0f  && virtualY <= cy + 195.0f) {
                 gameState = MENU;
             }
         }
     }
-    
+
     mousePressed = mouseDown;
 
     if (gameState == PLAYING) {
